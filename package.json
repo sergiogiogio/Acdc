@@ -1,0 +1,29 @@
+{
+  "name": "acdc",
+  "version": "0.0.1",
+  "dependencies": {
+    "debug": "*",
+    "form-data": "*"
+  },
+  "description": "A proxy for chromecast",
+  "main": "acdc.js",
+  "directories": {
+    "example": "examples"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sergiogiogio/Acdc.git"
+  },
+  "keywords": [
+    "chromecast"
+  ],
+  "author": "sergiogiogio",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/sergiogiogio/Acdc/issues"
+  },
+  "homepage": "https://github.com/sergiogiogio/Acdc#readme"
+}
