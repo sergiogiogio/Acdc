@@ -26,8 +26,10 @@ Session.prototype.read_response = function(res, transform, cb) {
 	});
 	res.on('end', function() {
 		try {	
+			console.log("=============== END > OK");
 			cb(null, transform(result));
 		} catch(err) {
+			console.log("=============== END > ERR");
 			cb(err);
 		}
 	});
@@ -35,7 +37,7 @@ Session.prototype.read_response = function(res, transform, cb) {
 
 Session.prototype.refresh_endpoint = function(cb_res) {
 	var self = this;
-	if(self.endpoint) cb_res(null, self.endpoint);
+	if(self.endpoint) return cb_res(null, self.endpoint);
 	console.log("no endpoint");
 	self.account_endpoint( function(err, data) {
 		if(err) return cb_res(err);
@@ -161,17 +163,19 @@ Session.prototype.resolve_path = function(node_path, cb) {
 				if(err) return cb(err);
 				self.read_response(res, JSON.parse, function(err, body) {
 					if(err) return cb(err);
-					cb(null, body.data[0]);	
+					cb(null, body);	
 				});	
 			});
 		break;
 
 		default:
-		self.resolve_path(parse.dir, function(err, node) {
+		self.resolve_path(parse.dir, function(err, result) {
+			if(err) return cb(err);
+			if(result.count === 0) return cb(err, result);
 			self.request(self.refresh_endpoint.bind(self),
 				function(opt) {
 					opt.host = url.parse(self.endpoint.metadataUrl).host;
-					opt.path = url.parse(self.endpoint.metadataUrl).pathname + "nodes/" + node.id + "/children?filters=name:" + encodeURIComponent(parse.name);
+					opt.path = url.parse(self.endpoint.metadataUrl).pathname + "nodes/" + result.data[0].id + "/children?filters=name:" + encodeURIComponent(parse.name);
 					opt.method = "GET"
 				}, function(req) {
 					req.end();
@@ -179,8 +183,7 @@ Session.prototype.resolve_path = function(node_path, cb) {
 					if(err) return cb(err);
 					self.read_response(res, JSON.parse, function(err, body) {
 						if(err) return cb(err);
-						if(!body.data || !body.data[0]) return cb(new AcdcError("ENOENT", "No such file or directory"));
-						cb(null, body.data[0]);	
+						cb(null, body);	
 					});
 				});
 		});
@@ -261,15 +264,101 @@ Session.prototype.overwrite = function(nodeid, filepath, cb) {
 			}, function(req) {
 				req.setHeader('Content-Type', 'multipart/form-data; boundary=' + form.getBoundary());
 				req.setHeader('Content-Length', length);
+				console.log(">>>>>>>>>>> boundary = %s, LENGTH = %d", form.getBoundary(), length);
 				form.pipe(req);
 			}, function(err, res) {
 				if(err) return cb(err);
 				self.read_response(res, JSON.parse, function(err, body) {
+					console.log("=== PARSE ===");
 					if(err) return cb(err);
 					cb(null, body);	
 				});
 			});
 	});
+};
+
+Session.prototype.create_folder = function(metadata, cb) {
+	var self = this;
+	
+	var data = JSON.stringify(metadata);
+	self.request(self.refresh_endpoint.bind(self),
+		function(opt){
+			opt.host = url.parse(self.endpoint.metadataUrl).host;
+			opt.path = url.parse(self.endpoint.metadataUrl).pathname + "nodes";
+			opt.method = "POST";
+			opt.headers['Content-Type'] = 'application/x-www-form-urlencoded';
+			opt.headers['Content-Length'] = Buffer.byteLength(data);
+
+		}, function(req) {
+			req.write(data);
+			req.end();
+		}, function(err, res) {
+			if(err) return cb(err);
+			self.read_response(res, JSON.parse, function(err, body) {
+				if(err) return cb(err);
+				cb(null, body);	
+			});
+		});
+};
+
+Session.prototype.add_child = function(parentid, childid, cb) {
+	var self = this;
+	
+	self.request(self.refresh_endpoint.bind(self),
+		function(opt){
+			opt.host = url.parse(self.endpoint.metadataUrl).host;
+			opt.path = url.parse(self.endpoint.metadataUrl).pathname + "nodes/" + parentid + "/children/" + childid;
+			opt.method = "PUT";
+
+		}, function(req) {
+			req.end();
+		}, function(err, res) {
+			if(err) return cb(err);
+			self.read_response(res, JSON.parse, function(err, body) {
+				if(err) return cb(err);
+				cb(null, body);	
+			});
+		});
+};
+
+Session.prototype.remove_child = function(parentid, childid, cb) {
+	var self = this;
+	
+	self.request(self.refresh_endpoint.bind(self),
+		function(opt){
+			opt.host = url.parse(self.endpoint.metadataUrl).host;
+			opt.path = url.parse(self.endpoint.metadataUrl).pathname + "nodes/" + parentid + "/children/" + childid;
+			opt.method = "DELETE";
+
+		}, function(req) {
+			req.end();
+		}, function(err, res) {
+			if(err) return cb(err);
+			self.read_response(res, JSON.parse, function(err, body) {
+				if(err) return cb(err);
+				cb(null, body);	
+			});
+		});
+};
+
+Session.prototype.add_to_trash = function(nodeid, cb) {
+	var self = this;
+	
+	self.request(self.refresh_endpoint.bind(self),
+		function(opt){
+			opt.host = url.parse(self.endpoint.metadataUrl).host;
+			opt.path = url.parse(self.endpoint.metadataUrl).pathname + "trash/" + nodeid;
+			opt.method = "PUT";
+
+		}, function(req) {
+			req.end();
+		}, function(err, res) {
+			if(err) return cb(err);
+			self.read_response(res, JSON.parse, function(err, body) {
+				if(err) return cb(err);
+				cb(null, body);	
+			});
+		});
 };
 
 exports.Session = Session;
