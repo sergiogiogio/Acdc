@@ -2,13 +2,14 @@
 
 var https = require('https');
 var http = require('http');
-var fs = require('fs');
 var querystring = require('querystring');
 var util = require('util');
 var EventEmitter = require('events');
 var url = require('url');
 var path = require('path');
 var FormData = require('form-data');
+var debug = require('debug')('acdc-api');
+var debugTransport = require('debug')('acdc-api:transport');
 
 var Session = function(token) {
 	this.token = token;
@@ -17,28 +18,33 @@ var Session = function(token) {
 
 util.inherits(Session, EventEmitter);
 
-Session.prototype.read_response = function(res, transform, cb) {
+var call_cb = function(fname, cb, err, result) {
+	debug("%s callback(%s, %j)", err || "SUCCESS", result);
+	cb(fname, err, result);
+}
+
+Session.prototype.read_response = function(res, requestId, transform, cb) {
 	var result = "";
 	res.setEncoding('utf8');
 	res.on('data', function (chunk) {
-		console.log("Response Chunk: %s", chunk);
+		debugTransport("Response chunk(%d): %s", requestId, chunk);
 		result += chunk;
 	});
 	res.on('end', function() {
+		var tresult;
 		try {	
-			console.log("=============== END > OK");
-			cb(null, transform(result));
+			tresult = transform(result);
 		} catch(err) {
-			console.log("=============== END > ERR");
-			cb(err);
+			return cb(err);
 		}
+		cb(null, tresult);
 	});
 }
 
 Session.prototype.refresh_endpoint = function(cb_res) {
 	var self = this;
 	if(self.endpoint) return cb_res(null, self.endpoint);
-	console.log("no endpoint");
+	debug("no endpoint");
 	self.account_endpoint( function(err, data) {
 		if(err) return cb_res(err);
 		self.endpoint = data;
@@ -47,10 +53,9 @@ Session.prototype.refresh_endpoint = function(cb_res) {
 	});
 }
 
-
+var sRequestId = 0;
 Session.prototype.request = function(cb_pre, cb_opt, cb_req, cb_res) {
 	var self = this;
-	console.log("request starting");
 	if(cb_pre) return cb_pre( function(err, result) {
 			if(err) return cb_res(err);
 			self.request(null, cb_opt, cb_req, cb_res);
@@ -61,16 +66,17 @@ Session.prototype.request = function(cb_pre, cb_opt, cb_req, cb_res) {
 		}
 	};
 	cb_opt(req_options);
-	console.log("## Request ##\nOptions: %j\n##", req_options);
 	var module = (req_options.host === "localhost") ? http : https;
+	var requestId = sRequestId++;
 	var req = module.request(req_options, function(res) {
-		console.log("## Response ##\nURL: %s\nStatusCode: %d\nHeaders: %j\n##", req_options.host+req_options.path, res.statusCode, res.headers);
+		debugTransport("Response(%d): %d, Headers: %j", requestId, res.statusCode, res.headers);
 		switch(res.statusCode) {
 			case 401: {
 				var data = querystring.stringify({
 					refresh_token: self.token.refresh_token
 				});
-				var req = https.request({
+				var tokenRequestId = sRequestId++;
+				var token_request_opt = {
 					host: "acdc-1163.appspot.com",
 					path: "/",
 					method: "POST",
@@ -78,15 +84,17 @@ Session.prototype.request = function(cb_pre, cb_opt, cb_req, cb_res) {
 						'Content-Type': 'application/x-www-form-urlencoded',
 						'Content-Length': Buffer.byteLength(data)
 					}
-				}, function(res) {
-					self.read_response(res, JSON.parse, function(err, body) {
-						self.token = body;
+				};
+				var req = https.request(token_request_opt, function(res) {
+					self.read_response(res, tokenRequestId, JSON.parse, function(err, token) {
+						self.token = token;
 						self.emit("newToken", self.token);
 						self.request(cb_pre, cb_opt, cb_req, cb_res);
 					});
 				});
 				req.write(data);
 				req.end();
+				debugTransport("Request(%d): %j", tokenRequestId, token_request_opt);
 			}
 			break;
 			case 200:
@@ -98,10 +106,13 @@ Session.prototype.request = function(cb_pre, cb_opt, cb_req, cb_res) {
 			break;
 		}
 	});
+	debugTransport("Request(%d): %j", requestId, req_options);
 	cb_req(req);
 };
 
 Session.prototype.account_endpoint = function(cb) {
+	var fname = "account_endpoint";
+	debug(fname);
 	var self = this;
 	self.request(null,
 		function(opt) {
@@ -110,36 +121,50 @@ Session.prototype.account_endpoint = function(cb) {
 			opt.method = "GET";
 		}, function(req) {
 			req.end();
-		}, function(err, res) {
-			if(err) return cb(err);
-			self.read_response(res, JSON.parse, function(err, body) {
-				if(err) return cb(err);
-				cb(null, body);					
-		});
-	});
+		}, function(err, res, requestId) {
+			if(err) return call_cb(fname, err);
+			self.read_response(res, JSON.parse, call_cb.bind(null, fname));
+		}
+	);
 };
 
 
 Session.prototype.list = function(filters, cb) {
+	var fname = "account_endpoint";
+	debug(fname);
 	var self = this;
 	self.request(self.refresh_endpoint.bind(self),
 		function(opt) {
 			opt.host = url.parse(self.endpoint.metadataUrl).host
-			opt.path = url.parse(self.endpoint.metadataUrl).pathname + "nodes?filters=" + encodeURIComponent(filters);
+			opt.path = url.parse(self.endpoint.metadataUrl).pathname + "nodes" + (filters ? "?filters=" + encodeURIComponent(filters) : "");
 			opt.method = "GET";
 		}, function(req) {
 			req.end();
-		}, function(err, res) {
-			if(err) return cb(err);
-			self.read_response(res, JSON.parse, function(err, body) {
-				if(err) return cb(err);
-				cb(null, body);	
-				
-			});
-		
-	});
+		}, function(err, res, requestId) {
+			if(err) return call_cb(fname, err);
+			self.read_response(res, JSON.parse, call_cb.bind(null, fname));
+		}
+	);
 };
 
+
+Session.prototype.list_children = function(parentid, filters, cb) {
+	var fname = "list_children";
+	debug(fname);
+	var self = this;
+	self.request(self.refresh_endpoint.bind(self),
+		function(opt) {
+			opt.host = url.parse(self.endpoint.metadataUrl).host
+			opt.path = url.parse(self.endpoint.metadataUrl).pathname + "nodes/" + parentid  + "/children" + (filters ? "?filters=" + encodeURIComponent(filters) : "");
+			opt.method = "GET";
+		}, function(req) {
+			req.end();
+		}, function(err, res, requestId) {
+			if(err) return call_cb(fname, err);
+			self.read_response(res, JSON.parse, call_cb.bind(null, fname));
+		}
+	);
+};
 
 var AcdcError = function(code, message) {
 	this.code = code;
@@ -148,6 +173,8 @@ var AcdcError = function(code, message) {
 
 
 Session.prototype.resolve_path = function(node_path, cb) {
+	var fname = "resolve_path";
+	debug(fname + "(%s)", node_path);
 	var self = this;
 	var parse = path.parse(node_path);
 	switch(parse.base) {
@@ -159,19 +186,17 @@ Session.prototype.resolve_path = function(node_path, cb) {
 				opt.method = "GET";
 			}, function(req) {
 				req.end();
-			}, function(err, res) {
-				if(err) return cb(err);
-				self.read_response(res, JSON.parse, function(err, body) {
-					if(err) return cb(err);
-					cb(null, body);	
-				});	
-			});
+			}, function(err, res, requestId) {
+				if(err) return call_cb(fname, err);
+				self.read_response(res, JSON.parse, call_cb.bind(null, fname));
+			}
+		);
 		break;
 
 		default:
 		self.resolve_path(parse.dir, function(err, result) {
-			if(err) return cb(err);
-			if(result.count === 0) return cb(err, result);
+			if(err) return call_cb(fname, err);
+			if(result.count === 0) return call_cb(fname, err, result);
 			self.request(self.refresh_endpoint.bind(self),
 				function(opt) {
 					opt.host = url.parse(self.endpoint.metadataUrl).host;
@@ -179,34 +204,71 @@ Session.prototype.resolve_path = function(node_path, cb) {
 					opt.method = "GET"
 				}, function(req) {
 					req.end();
-				}, function(err, res) {
-					if(err) return cb(err);
-					self.read_response(res, JSON.parse, function(err, body) {
-						if(err) return cb(err);
-						cb(null, body);	
-					});
-				});
+				}, function(err, res, requestId) {
+					if(err) return call_cb(fname, err);
+					self.read_response(res, JSON.parse, call_cb.bind(null, fname));
+				}
+			);
 		});
 		break;
 	}
 	
 }
 
-Session.prototype.upload = function(metadata, filepath, cb) {
+Session.prototype.create_folder_path = function(node_path, cb) {
+	var fname = "create_folder_path";
+	debug(fname + "(%s)", node_path);
+	var self = this;
+	var parse = path.parse(node_path);
+	switch(parse.base) {
+		case "":
+		self.request(self.refresh_endpoint.bind(self),
+			function(opt) {
+				opt.host = url.parse(self.endpoint.metadataUrl).host;
+				opt.path = url.parse(self.endpoint.metadataUrl).pathname + "nodes?filters=" + encodeURIComponent("kind:FOLDER AND isRoot:true");
+				opt.method = "GET";
+			}, function(req) {
+				req.end();
+			}, function(err, res, requestId) {
+				if(err) return call_cb(fname, err);
+				self.read_response(res, JSON.parse, function(err, body) {
+					if(err) return call_cb(fname, err);
+					call_cb(fname, null, body.data[0]);	
+				});	
+			}
+		);
+		break;
+
+		default:
+		self.create_folder_path(parse.dir, function(err, parent) {
+			if(err) return call_cb(fname, err);
+			self.create_folder({ name: parse.name, kind: "FOLDER", parents: [ parent.id ] }, function(err, result) {
+				if(err && err.message === "409") {
+					return self.list_children(parent.id, "name:" + parse.name, function(err, result){
+						if(err) return call_cb(fname, err);
+						call_cb(fname, null, result.data[0]);
+					})
+				}
+				if (err) return call_cb(fname, err);
+				self.read_response(res, JSON.parse, call_cb.bind(null, fname));
+			});
+		});
+		break;
+	}
+	
+}
+
+Session.prototype.upload = function(metadata, stream, cb) {
+	var fname = "upload";
+	debug(fname + "(%j)", metadata);
 	var self = this;
 	
-	metadata = metadata || {};
-	metadata.name = metadata.name || url.parse(filepath).pathname;
-	metadata.kind = metadata.kind || "FILE";
-
 	var form = new FormData();
 	form.append('metadata', JSON.stringify(metadata));
-	form.append('content', fs.createReadStream(filepath));
-	console.log("upload>metadata: %s", JSON.stringify(metadata));
+	form.append('content', stream);
 	
 	form.getLength(function(err, length) {
-		if(err) return cb(err);
-		console.log("upload>getLength: %d", length);
+		if(err) return call_cb(fname, err);
 		
 		self.request(self.refresh_endpoint.bind(self),
 			function(opt){
@@ -218,17 +280,17 @@ Session.prototype.upload = function(metadata, filepath, cb) {
 				req.setHeader('Content-Type', 'multipart/form-data; boundary=' + form.getBoundary());
 				req.setHeader('Content-Length', length);
 				form.pipe(req);
-			}, function(err, res) {
-				if(err) return cb(err);
-				self.read_response(res, JSON.parse, function(err, body) {
-					if(err) return cb(err);
-					cb(null, body);	
-				});
-			});
+			}, function(err, res, requestId) {
+				if(err) return call_cb(fname, err);
+				self.read_response(res, JSON.parse, call_cb.bind(null, fname));
+			}
+		);
 	});
 };
 
 Session.prototype.download = function(nodeid, stream, cb) {
+	var fname = "upload";
+	debug(fname + "(%s)", nodeid);
 	var self = this;
 	
 	self.request(self.refresh_endpoint.bind(self),
@@ -238,22 +300,25 @@ Session.prototype.download = function(nodeid, stream, cb) {
 			opt.method = "GET";
 		}, function(req) {
 			req.end();
-		}, function(err, res) {
-			if(err) return cb(err);
+		}, function(err, res, requestId) {
+			if(err) return call_cb(fname, err);
 			res.pipe(stream);
-			cb(null, res);
-		});
+			call_cb(fname, null, res);
+		}
+	);
 };
 
-Session.prototype.overwrite = function(nodeid, filepath, cb) {
+Session.prototype.overwrite = function(nodeid, stream, cb) {
+	var fname = "overwrite";
+	debug(fname + "(%s)", nodeid);
 	var self = this;
 	
 	var form = new FormData();
-	form.append('content', fs.createReadStream(filepath));
+	form.append('content', stream);
 	
 	form.getLength(function(err, length) {
-		if(err) return cb(err);
-		console.log("upload>getLength: %d", length);
+		if(err) return call_cb(fname, err);
+		debug("upload>getLength: %d", length);
 		
 		self.request(self.refresh_endpoint.bind(self),
 			function(opt){
@@ -264,20 +329,18 @@ Session.prototype.overwrite = function(nodeid, filepath, cb) {
 			}, function(req) {
 				req.setHeader('Content-Type', 'multipart/form-data; boundary=' + form.getBoundary());
 				req.setHeader('Content-Length', length);
-				console.log(">>>>>>>>>>> boundary = %s, LENGTH = %d", form.getBoundary(), length);
 				form.pipe(req);
-			}, function(err, res) {
-				if(err) return cb(err);
-				self.read_response(res, JSON.parse, function(err, body) {
-					console.log("=== PARSE ===");
-					if(err) return cb(err);
-					cb(null, body);	
-				});
-			});
+			}, function(err, res, requestId) {
+				if(err) return call_cb(fname, err);
+				self.read_response(res, JSON.parse, call_cb.bind(null, fname));
+			}
+		);
 	});
 };
 
 Session.prototype.create_folder = function(metadata, cb) {
+	var fname = "create_folder";
+	debug(fname + "(%j)", metadata);
 	var self = this;
 	
 	var data = JSON.stringify(metadata);
@@ -288,20 +351,19 @@ Session.prototype.create_folder = function(metadata, cb) {
 			opt.method = "POST";
 			opt.headers['Content-Type'] = 'application/x-www-form-urlencoded';
 			opt.headers['Content-Length'] = Buffer.byteLength(data);
-
 		}, function(req) {
 			req.write(data);
 			req.end();
-		}, function(err, res) {
-			if(err) return cb(err);
-			self.read_response(res, JSON.parse, function(err, body) {
-				if(err) return cb(err);
-				cb(null, body);	
-			});
-		});
+		}, function(err, res, requestId) {
+			if(err) return call_cb(fname, err);
+			self.read_response(res, JSON.parse, call_cb.bind(null, fname));
+		}
+	);
 };
 
 Session.prototype.add_child = function(parentid, childid, cb) {
+	var fname = "add_child";
+	debug(fname + "(%s, %s)", parentid, childid);
 	var self = this;
 	
 	self.request(self.refresh_endpoint.bind(self),
@@ -312,16 +374,16 @@ Session.prototype.add_child = function(parentid, childid, cb) {
 
 		}, function(req) {
 			req.end();
-		}, function(err, res) {
-			if(err) return cb(err);
-			self.read_response(res, JSON.parse, function(err, body) {
-				if(err) return cb(err);
-				cb(null, body);	
-			});
-		});
+		}, function(err, res, requestId) {
+			if(err) return call_cb(fname, err);
+			self.read_response(res, JSON.parse, call_cb.bind(null, fname));
+		}
+	);
 };
 
 Session.prototype.remove_child = function(parentid, childid, cb) {
+	var fname = "remove_child";
+	debug(fname + "(%s, %s)", parentid, childid);
 	var self = this;
 	
 	self.request(self.refresh_endpoint.bind(self),
@@ -332,16 +394,16 @@ Session.prototype.remove_child = function(parentid, childid, cb) {
 
 		}, function(req) {
 			req.end();
-		}, function(err, res) {
-			if(err) return cb(err);
-			self.read_response(res, JSON.parse, function(err, body) {
-				if(err) return cb(err);
-				cb(null, body);	
-			});
-		});
+		}, function(err, res, requestId) {
+			if(err) return call_cb(fname, err);
+			self.read_response(res, JSON.parse, call_cb.bind(null, fname));
+		}
+	);
 };
 
 Session.prototype.add_to_trash = function(nodeid, cb) {
+	var fname = "add_to_trash";
+	debug(fname + "(%s)", nodeid);
 	var self = this;
 	
 	self.request(self.refresh_endpoint.bind(self),
@@ -352,13 +414,11 @@ Session.prototype.add_to_trash = function(nodeid, cb) {
 
 		}, function(req) {
 			req.end();
-		}, function(err, res) {
-			if(err) return cb(err);
-			self.read_response(res, JSON.parse, function(err, body) {
-				if(err) return cb(err);
-				cb(null, body);	
-			});
-		});
+		}, function(err, res, requestId) {
+			if(err) return call_cb(fname, err);
+			self.read_response(res, JSON.parse, call_cb.bind(null, fname));
+		}
+	);
 };
 
 exports.Session = Session;

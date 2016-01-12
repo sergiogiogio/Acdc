@@ -82,6 +82,30 @@ session.resolve_path("/test2", function(err, target) {
 	});
 });*/
 
+/*
+create folder - check it exists
+upload file to folder - download to verify
+overwrite file - download to verify
+create sub-folder - check it exists
+move file to sub-folder - check it exists
+delete file - check it does not exist
+delete folder - check it does not exist
+*/
+
+
+/*session.create_folder({ name: "test-folder", kind: "FOLDER" }, function(err, result) {
+	console.log("create_folder: %j, %j", err ? err.message : "", result);
+	assert.equal(err, null, "Folder could not be created");
+});*/
+
+session.create_folder_path("/AcdcTests", function(err, folder) {
+	console.log("create_folder_path: %j, %j", err ? err.message : "", folder);
+	assert.equal(err, null, "Folder could not be created");
+	session.upload( {name: "file", kind: "FILE", parents: [ folder.id ] }, fs.createReadStream("file"), function(err, file) {
+	console.log("upload: %j, %j", err ? err.message : "", file);
+	assert.equal(err, null, "File could not be uploaded");
+	});
+});
 
 var util = require("util");
 process.on('SIGINT', function() { console.log( util.inspect(process._getActiveHandles()) ); console.log(process._getActiveHandles()[0].constructor.name); console.log( util.inspect(process._getActiveRequests()) ); process.exit(); });
