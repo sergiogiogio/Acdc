@@ -3,7 +3,8 @@
   "version": "0.0.1",
   "dependencies": {
     "debug": "*",
-    "form-data": "*"
+    "form-data": "*",
+    "async": "*"
   },
   "description": "A proxy for chromecast",
   "main": "acdc.js",
