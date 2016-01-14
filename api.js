@@ -19,8 +19,8 @@ var Session = function(token) {
 util.inherits(Session, EventEmitter);
 
 var call_cb = function(fname, cb, err, result) {
-	debug("%s callback(%s, %j)", err || "SUCCESS", result);
-	cb(fname, err, result);
+	debug("%s callback(%s, %j)", fname, err || "SUCCESS", result);
+	cb(err, result);
 }
 
 Session.prototype.read_response = function(res, requestId, transform, cb) {
@@ -43,7 +43,7 @@ Session.prototype.read_response = function(res, requestId, transform, cb) {
 
 Session.prototype.refresh_endpoint = function(cb_res) {
 	var self = this;
-	if(self.endpoint) return cb_res(null, self.endpoint);
+	if(self.endpoint) return process.nextTick(cb_res, null, self.endpoint);
 	debug("no endpoint");
 	self.account_endpoint( function(err, data) {
 		if(err) return cb_res(err);
@@ -99,10 +99,10 @@ Session.prototype.request = function(cb_pre, cb_opt, cb_req, cb_res) {
 			break;
 			case 200:
 			case 201:
-				cb_res(null, res);
+				cb_res(null, res, requestId);
 			break;
 			default:
-				cb_res(new Error(res.statusCode), res);
+				cb_res(new Error(res.statusCode), res, requestId);
 			break;
 		}
 	});
@@ -122,8 +122,8 @@ Session.prototype.account_endpoint = function(cb) {
 		}, function(req) {
 			req.end();
 		}, function(err, res, requestId) {
-			if(err) return call_cb(fname, err);
-			self.read_response(res, JSON.parse, call_cb.bind(null, fname));
+			if(err) return call_cb(fname, cb, err);
+			self.read_response(res, requestId, JSON.parse, call_cb.bind(null, fname, cb));
 		}
 	);
 };
@@ -141,8 +141,8 @@ Session.prototype.list = function(filters, cb) {
 		}, function(req) {
 			req.end();
 		}, function(err, res, requestId) {
-			if(err) return call_cb(fname, err);
-			self.read_response(res, JSON.parse, call_cb.bind(null, fname));
+			if(err) return call_cb(fname, cb, err);
+			self.read_response(res, requestId, JSON.parse, call_cb.bind(null, fname, cb));
 		}
 	);
 };
@@ -160,8 +160,8 @@ Session.prototype.list_children = function(parentid, filters, cb) {
 		}, function(req) {
 			req.end();
 		}, function(err, res, requestId) {
-			if(err) return call_cb(fname, err);
-			self.read_response(res, JSON.parse, call_cb.bind(null, fname));
+			if(err) return call_cb(fname, cb, err);
+			self.read_response(res, requestId, JSON.parse, call_cb.bind(null, fname, cb));
 		}
 	);
 };
@@ -187,15 +187,15 @@ Session.prototype.resolve_path = function(node_path, cb) {
 			}, function(req) {
 				req.end();
 			}, function(err, res, requestId) {
-				if(err) return call_cb(fname, err);
-				self.read_response(res, JSON.parse, call_cb.bind(null, fname));
+				if(err) return call_cb(fname, cb, err);
+				self.read_response(res, requestId, JSON.parse, call_cb.bind(null, fname, cb));
 			}
 		);
 		break;
 
 		default:
 		self.resolve_path(parse.dir, function(err, result) {
-			if(err) return call_cb(fname, err);
+			if(err) return call_cb(fname, cb, err);
 			if(result.count === 0) return call_cb(fname, err, result);
 			self.request(self.refresh_endpoint.bind(self),
 				function(opt) {
@@ -205,8 +205,8 @@ Session.prototype.resolve_path = function(node_path, cb) {
 				}, function(req) {
 					req.end();
 				}, function(err, res, requestId) {
-					if(err) return call_cb(fname, err);
-					self.read_response(res, JSON.parse, call_cb.bind(null, fname));
+					if(err) return call_cb(fname, cb, err);
+					self.read_response(res, requestId, JSON.parse, call_cb.bind(null, fname, cb));
 				}
 			);
 		});
@@ -230,10 +230,10 @@ Session.prototype.create_folder_path = function(node_path, cb) {
 			}, function(req) {
 				req.end();
 			}, function(err, res, requestId) {
-				if(err) return call_cb(fname, err);
-				self.read_response(res, JSON.parse, function(err, body) {
-					if(err) return call_cb(fname, err);
-					call_cb(fname, null, body.data[0]);	
+				if(err) return call_cb(fname, cb, err);
+				self.read_response(res, requestId, JSON.parse, function(err, body) {
+					if(err) return call_cb(fname, cb, err);
+					call_cb(fname, cb, null, body.data[0]);	
 				});	
 			}
 		);
@@ -241,16 +241,15 @@ Session.prototype.create_folder_path = function(node_path, cb) {
 
 		default:
 		self.create_folder_path(parse.dir, function(err, parent) {
-			if(err) return call_cb(fname, err);
+			if(err) return call_cb(fname, cb, err);
 			self.create_folder({ name: parse.name, kind: "FOLDER", parents: [ parent.id ] }, function(err, result) {
 				if(err && err.message === "409") {
 					return self.list_children(parent.id, "name:" + parse.name, function(err, result){
-						if(err) return call_cb(fname, err);
-						call_cb(fname, null, result.data[0]);
+						if(err) return call_cb(fname, cb, err);
+						call_cb(fname, cb, null, result.data[0]);
 					})
 				}
-				if (err) return call_cb(fname, err);
-				self.read_response(res, JSON.parse, call_cb.bind(null, fname));
+				call_cb(fname, cb, err, result);
 			});
 		});
 		break;
@@ -268,7 +267,7 @@ Session.prototype.upload = function(metadata, stream, cb) {
 	form.append('content', stream);
 	
 	form.getLength(function(err, length) {
-		if(err) return call_cb(fname, err);
+		if(err) return call_cb(fname, cb, err);
 		
 		self.request(self.refresh_endpoint.bind(self),
 			function(opt){
@@ -281,8 +280,8 @@ Session.prototype.upload = function(metadata, stream, cb) {
 				req.setHeader('Content-Length', length);
 				form.pipe(req);
 			}, function(err, res, requestId) {
-				if(err) return call_cb(fname, err);
-				self.read_response(res, JSON.parse, call_cb.bind(null, fname));
+				if(err) return call_cb(fname, cb, err);
+				self.read_response(res, requestId, JSON.parse, call_cb.bind(null, fname, cb));
 			}
 		);
 	});
@@ -301,7 +300,7 @@ Session.prototype.download = function(nodeid, stream, cb) {
 		}, function(req) {
 			req.end();
 		}, function(err, res, requestId) {
-			if(err) return call_cb(fname, err);
+			if(err) return call_cb(fname, cb, err);
 			res.pipe(stream);
 			call_cb(fname, null, res);
 		}
@@ -317,7 +316,7 @@ Session.prototype.overwrite = function(nodeid, stream, cb) {
 	form.append('content', stream);
 	
 	form.getLength(function(err, length) {
-		if(err) return call_cb(fname, err);
+		if(err) return call_cb(fname, cb, err);
 		debug("upload>getLength: %d", length);
 		
 		self.request(self.refresh_endpoint.bind(self),
@@ -331,8 +330,8 @@ Session.prototype.overwrite = function(nodeid, stream, cb) {
 				req.setHeader('Content-Length', length);
 				form.pipe(req);
 			}, function(err, res, requestId) {
-				if(err) return call_cb(fname, err);
-				self.read_response(res, JSON.parse, call_cb.bind(null, fname));
+				if(err) return call_cb(fname, cb, err);
+				self.read_response(res, requestId, JSON.parse, call_cb.bind(null, fname, cb));
 			}
 		);
 	});
@@ -355,8 +354,31 @@ Session.prototype.create_folder = function(metadata, cb) {
 			req.write(data);
 			req.end();
 		}, function(err, res, requestId) {
-			if(err) return call_cb(fname, err);
-			self.read_response(res, JSON.parse, call_cb.bind(null, fname));
+			if(err) return call_cb(fname, cb, err);
+			self.read_response(res, requestId, JSON.parse, call_cb.bind(null, fname, cb));
+		}
+	);
+};
+
+Session.prototype.move = function(nodeid, fromid, toid, cb) {
+	var fname = "move";
+	debug(fname + "(%s, %s, %s)", nodeid, fromid, toid);
+	var self = this;
+	
+	var data = JSON.stringify({ fromParent: fromid, childId: nodeid });
+	self.request(self.refresh_endpoint.bind(self),
+		function(opt){
+			opt.host = url.parse(self.endpoint.metadataUrl).host;
+			opt.path = url.parse(self.endpoint.metadataUrl).pathname + "nodes/" + toid + "/children";
+			opt.method = "POST";
+			opt.headers['Content-Type'] = 'application/x-www-form-urlencoded';
+			opt.headers['Content-Length'] = Buffer.byteLength(data);
+		}, function(req) {
+			req.write(data);
+			req.end();
+		}, function(err, res, requestId) {
+			if(err) return call_cb(fname, cb, err);
+			self.read_response(res, requestId, JSON.parse, call_cb.bind(null, fname, cb));
 		}
 	);
 };
@@ -375,8 +397,8 @@ Session.prototype.add_child = function(parentid, childid, cb) {
 		}, function(req) {
 			req.end();
 		}, function(err, res, requestId) {
-			if(err) return call_cb(fname, err);
-			self.read_response(res, JSON.parse, call_cb.bind(null, fname));
+			if(err) return call_cb(fname, cb, err);
+			self.read_response(res, requestId, JSON.parse, call_cb.bind(null, fname, cb));
 		}
 	);
 };
@@ -395,8 +417,8 @@ Session.prototype.remove_child = function(parentid, childid, cb) {
 		}, function(req) {
 			req.end();
 		}, function(err, res, requestId) {
-			if(err) return call_cb(fname, err);
-			self.read_response(res, JSON.parse, call_cb.bind(null, fname));
+			if(err) return call_cb(fname, cb, err);
+			self.read_response(res, requestId, JSON.parse, call_cb.bind(null, fname, cb));
 		}
 	);
 };
@@ -415,8 +437,8 @@ Session.prototype.add_to_trash = function(nodeid, cb) {
 		}, function(req) {
 			req.end();
 		}, function(err, res, requestId) {
-			if(err) return call_cb(fname, err);
-			self.read_response(res, JSON.parse, call_cb.bind(null, fname));
+			if(err) return call_cb(fname, cb, err);
+			self.read_response(res, requestId, JSON.parse, call_cb.bind(null, fname, cb));
 		}
 	);
 };

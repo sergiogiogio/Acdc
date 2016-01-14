@@ -6,6 +6,9 @@ var token = require("./token.json");
 
 var session = new Api.Session(token);
 
+var fs = require("fs");
+var crypto = require("crypto");
+
 //recreate token:
 // https://www.amazon.com/ap/oa?client_id=amzn1.application-oa2-client.d1f16785649d4f5099fd3c95ecf6047b&scope=clouddrive%3Aread_all%20clouddrive%3Awrite&response_type=code&redirect_uri=https://acdc-1163.appspot.com
 
@@ -97,14 +100,47 @@ delete folder - check it does not exist
 	console.log("create_folder: %j, %j", err ? err.message : "", result);
 	assert.equal(err, null, "Folder could not be created");
 });*/
-
-session.create_folder_path("/AcdcTests", function(err, folder) {
-	console.log("create_folder_path: %j, %j", err ? err.message : "", folder);
-	assert.equal(err, null, "Folder could not be created");
-	session.upload( {name: "file", kind: "FILE", parents: [ folder.id ] }, fs.createReadStream("file"), function(err, file) {
-	console.log("upload: %j, %j", err ? err.message : "", file);
-	assert.equal(err, null, "File could not be uploaded");
-	});
+session.resolve_path("/AcdcTests", function(err, folders) {
+	console.log("resolve_path: %s, %j", err || "SUCCESS", folders);
+	if(folders.count !== 0) {
+		session.add_to_trash(folders.data[0].id, function(err, trashresult) {
+			console.log("add_to_trash: %s, %j", err || "SUCCESS", trashresult);
+			assert.equal(err, null, "Folder could not be trashed");
+			next();
+		});
+	} else process.nextTick(function() { next(); });
+	var next = function() {
+		session.create_folder_path("/AcdcTests", function(err, folder) {
+			console.log("create_folder_path: %s, %j", err || "SUCCESS", folder);
+			assert.equal(err, null, "Folder could not be created");
+			session.upload( {name: "file-upload", kind: "FILE", parents: [ folder.id ] }, fs.createReadStream("file"), function(err, file) {
+				console.log("upload: %s, %j", err || "SUCCESS", file);
+				assert.equal(err, null, "File could not be uploaded");
+				var fileStream = fs.createReadStream("file"), hash = crypto.createHash('md5');
+				hash.setEncoding('hex');
+				fileStream.pipe(hash);
+				fileStream.on('end', function() {
+					hash.end();
+					var computedHash = hash.read();
+					console.log("computed MD5: ", computedHash);
+					assert.equal(file.contentProperties.md5, computedHash, "MD5 hash do not match");
+					session.overwrite(file.id, fs.createReadStream("file2"), function(err, file) {
+						console.log("overwrite: %s, %j", err || "SUCCESS", file);
+						assert.equal(err, null, "File could not be overwritten");
+						session.create_folder( { name: "SubFolder", kind: "FILE", parents: [ folder.id ] }, function(err, subfolder) {
+							console.log("create_folder: %s, %j", err || "SUCCESS", subfolder);
+							assert.equal(err, null, "SubFolder could not be created");
+							session.move(file.id, folder.id, subfolder.id, function(err, movedfile) {
+								console.log("move: %s, %j", err || "SUCCESS", movedfile);
+								assert.equal(err, null, "File could not be created");
+							});
+						});
+					});
+				});
+				
+			});
+		});
+	};
 });
 
 var util = require("util");
