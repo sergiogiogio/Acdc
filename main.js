@@ -127,12 +127,12 @@ session.resolve_path("/AcdcTests", function(err, folders) {
 					session.overwrite(file.id, fs.createReadStream("file2"), function(err, file) {
 						console.log("overwrite: %s, %j", err || "SUCCESS", file);
 						assert.equal(err, null, "File could not be overwritten");
-						session.create_folder( { name: "SubFolder", kind: "FILE", parents: [ folder.id ] }, function(err, subfolder) {
+						session.create_folder( { name: "SubFolder", kind: "FOLDER", parents: [ folder.id ] }, function(err, subfolder) {
 							console.log("create_folder: %s, %j", err || "SUCCESS", subfolder);
 							assert.equal(err, null, "SubFolder could not be created");
 							session.move(file.id, folder.id, subfolder.id, function(err, movedfile) {
 								console.log("move: %s, %j", err || "SUCCESS", movedfile);
-								assert.equal(err, null, "File could not be created");
+								assert.equal(err, null, "File could not be moved");
 							});
 						});
 					});
