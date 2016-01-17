@@ -128,15 +128,23 @@ Session.prototype.account_endpoint = function(cb) {
 	);
 };
 
+var serialize = function(obj) {
+	var str = [];
+	for(var p in obj)
+		if (obj.hasOwnProperty(p)) {
+			str.push(encodeURIComponent(p) + "=" + encodeURIComponent(obj[p]));
+		}
+	return str.join("&");
+}
 
-Session.prototype.list = function(filters, cb) {
-	var fname = "account_endpoint";
-	debug(fname);
+Session.prototype.list = function(options, cb) {
+	var fname = "list";
+	debug(fname + "(%j)", options);
 	var self = this;
 	self.request(self.refresh_endpoint.bind(self),
 		function(opt) {
-			opt.host = url.parse(self.endpoint.metadataUrl).host
-			opt.path = url.parse(self.endpoint.metadataUrl).pathname + "nodes" + (filters ? "?filters=" + encodeURIComponent(filters) : "");
+			opt.host = url.parse(self.endpoint.metadataUrl).host;
+			opt.path = url.parse(self.endpoint.metadataUrl).pathname + "nodes" + (options ? "?" + serialize(options) : "");
 			opt.method = "GET";
 		}, function(req) {
 			req.end();
@@ -148,14 +156,14 @@ Session.prototype.list = function(filters, cb) {
 };
 
 
-Session.prototype.list_children = function(parentid, filters, cb) {
+Session.prototype.list_children = function(parentid, options, cb) {
 	var fname = "list_children";
-	debug(fname);
+	debug(fname + "(%s, %j)", parentid, options);
 	var self = this;
 	self.request(self.refresh_endpoint.bind(self),
 		function(opt) {
 			opt.host = url.parse(self.endpoint.metadataUrl).host
-			opt.path = url.parse(self.endpoint.metadataUrl).pathname + "nodes/" + parentid  + "/children" + (filters ? "?filters=" + encodeURIComponent(filters) : "");
+			opt.path = url.parse(self.endpoint.metadataUrl).pathname + "nodes/" + parentid  + "/children" + (options ? "?" + serialize(options) : "");
 			opt.method = "GET";
 		}, function(req) {
 			req.end();
@@ -244,7 +252,7 @@ Session.prototype.create_folder_path = function(node_path, cb) {
 			if(err) return call_cb(fname, cb, err);
 			self.create_folder({ name: parse.name, kind: "FOLDER", parents: [ parent.id ] }, function(err, result) {
 				if(err && err.message === "409") {
-					return self.list_children(parent.id, "name:" + parse.name, function(err, result){
+					return self.list_children(parent.id, { filters: "name:" + parse.name }, function(err, result){
 						if(err) return call_cb(fname, cb, err);
 						call_cb(fname, cb, null, result.data[0]);
 					})

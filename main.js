@@ -133,11 +133,16 @@ session.resolve_path("/AcdcTests", function(err, folders) {
 							session.move(file.id, folder.id, subfolder.id, function(err, movedfile) {
 								console.log("move: %s, %j", err || "SUCCESS", movedfile);
 								assert.equal(err, null, "File could not be moved");
+								setTimeout( function() {
+									session.list_children(subfolder.id, { sort: '["name"]' }, function(err, children) {
+										console.log("list_children: %s, %j", err || "SUCCESS", children);
+										assert.equal(err, null, "SubFolder content could not be listed");
+									});
+								}, 10000);
 							});
 						});
 					});
 				});
-				
 			});
 		});
 	};

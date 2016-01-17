@@ -20,8 +20,9 @@ var FsPath = function(path) {
 	this.path = path;
 }
 
-var AcPath = function(path) {
-	this.path = path;
+var AcPath = function(session, id) {
+	this.id = id;
+	this.session = session;
 }
 
 var listFiles = function(path, cb) {
@@ -34,14 +35,11 @@ var listFiles = function(path, cb) {
 			for(var i = 0 ; i < itemnames.length ; ++i) {
 				files[i] = {};
 			}
-			console.log("%d, %j", itemnames.length, files[0]);
 			async.forEachOf(itemnames, function(itemname, index, cb) {
-				console.log("Index = %d", index);
 				fs.open(path.path + "/" + itemname, "r", function(err, fd) {
 					if(err) return cb(err);
 					fs.fstat(fd, function(err, stats) {
 						if(err) return cb(err);
-						console.log("%d", index);
 						files[index].size = stats.size;
 						files[index].name = itemname;
 						files[index].isDirectory = stats.isDirectory();
@@ -65,6 +63,8 @@ var listFiles = function(path, cb) {
 
 		});
 	} else if(path instanceof AcPath) {
+		path.session.list_children(path.id, null, function(err, items) {
+		});
 	}
 	
 }
@@ -104,17 +104,30 @@ var overwriteFile = function(pathFrom, name, pathTo, cb) {
 	} 
 }
 
-var deleteItem = function(path, name, cb) {
-	debug("delteItem %j", path);
-	if(path instanceof FsPath) {
-		fs.unlink(path.join(path, name), cb);
+var deleteItem = function(basePath, name, cb) {
+	debug("deleteItem %j", basePath);
+	if(basePath instanceof FsPath) {
+		fs.unlink(path.join(basePath.path, name), cb);
 	} 
 }
 
-var createFolder = function(path, cb) {
-	debug("createFolder %j", path);
-	if(path instanceof FsPath) {
-		fs.mkdir(path.path, cb);
+var createFolder = function(basePath, name, cb) {
+	debug("createFolder %j", basePath);
+	if(basePath instanceof FsPath) {
+		var newPath = path.join(basePath.path, name);
+		fs.mkdir(newPath, function(err) {
+			if(err) return cb(err);
+			return cb(err, new FsPath(newPath));
+		});
+	}
+}
+
+var pathJoin = function(basePath, name, cb) {
+	debug("pathJoin %j, %s", basePath, name);
+	if(basePath instanceof FsPath) {
+		process.nextTick(function() {
+			cb(null, new FsPath(path.join(basePath.path, name)));
+		});
 	}
 }
 
@@ -122,69 +135,108 @@ var createFolder = function(path, cb) {
 	console.log("%s, %j", err, files);
 });*/
 
-var rsync = function(pathFrom, pathTo, cb) {
+var rsync = function(options, pathFrom, pathTo, cb) {
+	debug("rsync %j", pathFrom, pathTo);
 	async.parallel({
 		listFrom: listFiles.bind(null, pathFrom),
 		listTo: listFiles.bind(null, pathTo),
 	},
 	function(err, results) {
 		if(err) return cb(err);
-		console.log("%j", results);
 		var fromIt = 0, toIt = 0;
 		var queue = async.queue(function(fun, cb) { fun(cb); });
 		queue.drain = cb;
-		for(; fromIt < results.listFrom.length ;) {
-			(function(curFromIt, curToIt) {
-				if(toIt >= results.listTo.length || results.listFrom[curFromIt].name < results.listTo[curToIt].name) {
-					queue.push(function(cb) {
-						if(!results.listFrom[curFromIt].isDirectory) {
-							copyFile(pathFrom, results.listFrom[curFromIt].name, pathTo, cb);
-						} else {
-							createFolder(pathTo, results.listFrom[curFromIt].name, function(err, subfolder) {
-								if(err) return cb(err);
-								rsync(results.listFrom[curFromIt], subfolder, cb);
-							});
-						}
-					});
-					fromIt++;
-				} else if(results.listFrom[curFromIt].name === results.listTo[curToIt].name) {
-					if(results.listFrom[curFromIt].isDirectory !== results.listTo[curToIt].isDirectory) {
-						queue.push( function(cb) {
-							deleteItem(pathTo, results.listTo[curToIt], function(err) {
-								if(err) return cb(err);
-								if(!results.listFrom[curFromIt].isDirectory) {
-									copyFile(pathFrom, results.listFrom[curFromIt].name, pathTo, cb);
-								} else {
-									createFolder(pathTo, results.listFrom[curFromIt].name, function(err, subfolder) {
-										if(err) return cb(err);
-										rsync(results.listFrom[curFromIt], subfolder, cb);
-									});
-								}
-							})
+		for(; fromIt < results.listFrom.length || toIt < results.listTo.length ;) {
+			var series = [];
+
+			if(	(
+					fromIt < results.listFrom.length && toIt < results.listTo.length &&
+					results.listFrom[fromIt].name === results.listTo[toIt].name && // same name
+					(
+						results.listFrom[fromIt].isDirectory !== results.listTo[toIt].isDirectory || // different type, or
+						(
+							!results.listFrom[fromIt].isDirectory && ( // (for files only)
+								results.listFrom[fromIt].size !== results.listTo[toIt].size || // different size, or
+								results.listFrom[fromIt].md5 !== results.listTo[toIt].md5 // different hash
+							)
+						)
+					)
+				)
+			) { // conflicting name
+				// delete/archive
+				series.push(function(toIt, cb) {
+					deleteItem(pathTo, results.listTo[toIt].name, cb);
+				}.bind(null, toIt));
+				toIt++;
+			} else if ( (
+					fromIt < results.listFrom.length && toIt < results.listTo.length && // extraneous in To
+					results.listFrom[fromIt].name > results.listTo[toIt].name
+				) || (
+					fromIt >= results.listFrom.length // extraneous in To
+				)
+			) {
+				// delete/archive or do nothing - no dependencies (direct queue push)
+				if (options.deleteExtraneous) {
+					queue.push(function(toIt, cb) {
+						deleteItem(pathTo, results.listTo[toIt].name, cb);
+					}.bind(null, toIt));
+				}
+				toIt++;
+			}
+
+			if(	fromIt < results.listFrom.length && toIt < results.listTo.length &&
+				results.listFrom[fromIt].name === results.listTo[toIt].name && // same name
+				(
+					results.listFrom[fromIt].isDirectory === results.listTo[toIt].isDirectory && // same type, and
+					(
+						results.listFrom[fromIt].isDirectory || ( // (for files only)
+							results.listFrom[fromIt].size === results.listTo[toIt].size && // same size, and
+							results.listFrom[fromIt].md5 === results.listTo[toIt].md5 // same hash
+						)
+					)
+				)
+			) {	// rsync folder
+				if(results.listFrom[fromIt].isDirectory) {
+					queue.push(function(fromIt, toIt, cb) {
+						async.parallel({
+							subPathFrom: pathJoin.bind(null, pathFrom, results.listFrom[fromIt].name),
+							subPathTo: pathJoin.bind(null, pathTo, results.listTo[toIt].name)
+						}, function(err, results) {
+							if(err) return cb(err);
+							rsync(options, results.subPathFrom, results.subPathTo, cb);
 						});
-					} else if(results.listFrom[curFromIt].isDirectory) {
-						queue.push( function(cb) {
-							rsync(results.listFrom[curFromIt], subfolder, cb)
-						});
-					} else if(results.listFrom[curFromIt].size === results.listTo[curToIt].size
-					&& results.listFrom[curFromIt].md5 === results.listTo[curToIt].md5) {
+					}.bind(null, fromIt, toIt));
+				}
+				// do nothing to files
+				fromIt++; toIt++;
+			} else if(fromIt < results.listFrom.length && 
+					(toIt >= results.listTo.length ||
+					results.listFrom[fromIt].name < results.listTo[toIt].name)
+				) {
+				// copy & rsync
+				series.push(function(fromIt, cb) {
+					if(!results.listFrom[fromIt].isDirectory) {
+						copyFile(pathFrom, results.listFrom[fromIt].name, pathTo, cb);
 					} else {
-						queue.push( function(cb) {
-							overwriteFile(pathFrom, results.listFrom[curFromIt].name, pathTo, cb);
+						async.parallel({
+							subPathFrom: pathJoin.bind(null, pathFrom, results.listFrom[fromIt].name),
+							subPathTo: createFolder.bind(null, pathTo, results.listFrom[fromIt].name)
+						}, function(err, results) {
+							if(err) return cb(err);
+							rsync(options, results.subPathFrom, results.subPathTo, cb);
 						});
 					}
-					fromIt++; toIt++;
-				} 
-				else if(results.listFrom[curFromIt].name > results.listTo[curToIt].name) {
-					toIt++;
-				}
-			})(fromIt, toIt);
+				}.bind(null, fromIt));
+				queue.push(async.series.bind(null, series));
+				fromIt++;
+			}
+
 		}
 	});
 }
 
-rsync(new FsPath("a"), new FsPath("b"), function(err) {
-	console.log("rsync: %s", err);
+rsync({}, new FsPath("a"), new FsPath("b"), function(err) {
+	console.log("rsync: %s", err || "SUCCESS");
 });
 
 var util = require("util");
