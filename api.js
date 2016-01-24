@@ -8,6 +8,7 @@ var EventEmitter = require('events');
 var url = require('url');
 var path = require('path');
 var FormData = require('form-data');
+var mstream = require('stream');
 var debug = require('debug')('acdc-api');
 var debugTransport = require('debug')('acdc-api:transport');
 
@@ -52,6 +53,16 @@ Session.prototype.refresh_endpoint = function(cb_res) {
 		cb_res(null, self.endpoint);
 	});
 }
+
+var LogStream = function(requestId) {
+	this.requestId = requestId;
+	LogStream.super_.call(this);
+}
+util.inherits(LogStream, mstream.PassThrough);
+LogStream.prototype._transform = function(chunk, encoding, callback) {
+	debugTransport("Request chunk(%d): %s", this.requestId, chunk);
+	return LogStream.super_.prototype._transform.call(this, chunk, encoding, callback);
+};
 
 var sRequestId = 0;
 Session.prototype.request = function(cb_pre, cb_opt, cb_req, cb_res) {
@@ -107,7 +118,9 @@ Session.prototype.request = function(cb_pre, cb_opt, cb_req, cb_res) {
 		}
 	});
 	debugTransport("Request(%d): %j", requestId, req_options);
-	cb_req(req);
+	var logstream = new LogStream(requestId);
+	logstream.pipe(req);
+	cb_req(logstream);
 };
 
 Session.prototype.account_endpoint = function(cb) {
@@ -265,14 +278,14 @@ Session.prototype.create_folder_path = function(node_path, cb) {
 	
 }
 
-Session.prototype.upload = function(metadata, stream, cb) {
+Session.prototype.upload = function(metadata, stream, streamlength, cb) {
 	var fname = "upload";
 	debug(fname + "(%j)", metadata);
 	var self = this;
 	
 	var form = new FormData();
 	form.append('metadata', JSON.stringify(metadata));
-	form.append('content', stream);
+	form.append('content', stream, streamlength? { knownLength: streamlength, filename: metadata.name } : undefined);
 	
 	form.getLength(function(err, length) {
 		if(err) return call_cb(fname, cb, err);
@@ -283,9 +296,9 @@ Session.prototype.upload = function(metadata, stream, cb) {
 				//opt.host = "localhost";
 				opt.path = url.parse(self.endpoint.contentUrl).pathname + "nodes";
 				opt.method = "POST";
+				opt.headers['Content-Type'] = 'multipart/form-data; boundary=' + form.getBoundary();
+				opt.headers['Content-Length'] = length;
 			}, function(req) {
-				req.setHeader('Content-Type', 'multipart/form-data; boundary=' + form.getBoundary());
-				req.setHeader('Content-Length', length);
 				form.pipe(req);
 			}, function(err, res, requestId) {
 				if(err) return call_cb(fname, cb, err);
@@ -310,22 +323,21 @@ Session.prototype.download = function(nodeid, stream, cb) {
 		}, function(err, res, requestId) {
 			if(err) return call_cb(fname, cb, err);
 			res.pipe(stream);
-			call_cb(fname, null, res);
+			call_cb(fname, cb, null);
 		}
 	);
 };
 
-Session.prototype.overwrite = function(nodeid, stream, cb) {
+Session.prototype.overwrite = function(nodeid, stream, streamlength, cb) {
 	var fname = "overwrite";
 	debug(fname + "(%s)", nodeid);
 	var self = this;
 	
 	var form = new FormData();
-	form.append('content', stream);
+	form.append('content', stream, streamlength? { knownLength: streamlength, filename: metadata.name } : undefined);
 	
 	form.getLength(function(err, length) {
 		if(err) return call_cb(fname, cb, err);
-		debug("upload>getLength: %d", length);
 		
 		self.request(self.refresh_endpoint.bind(self),
 			function(opt){
@@ -333,9 +345,9 @@ Session.prototype.overwrite = function(nodeid, stream, cb) {
 				//opt.host = "localhost";
 				opt.path = url.parse(self.endpoint.contentUrl).pathname + "nodes/" + nodeid + "/content";
 				opt.method = "PUT";
+				opt.headers['Content-Type'] = 'multipart/form-data; boundary=' + form.getBoundary();
+				opt.headers['Content-Length'] = length;
 			}, function(req) {
-				req.setHeader('Content-Type', 'multipart/form-data; boundary=' + form.getBoundary());
-				req.setHeader('Content-Length', length);
 				form.pipe(req);
 			}, function(err, res, requestId) {
 				if(err) return call_cb(fname, cb, err);

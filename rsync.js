@@ -1,3 +1,5 @@
+'use strict'
+
 var assert = require('assert');
 
 var Api = require("./api");
@@ -11,141 +13,237 @@ var crypto = require("crypto");
 var async = require("async");
 var path = require("path");
 var debug = require("debug")("rsync")
+var mstream = require("stream");
+var util = require("util");
 
-var FsPath = function(path) {
-	this.path = path;
+var FsCursor = function(path) {
+	this.currentPath = path;
 }
 
-var FsPath = function(path) {
-	this.path = path;
-}
-
-var AcPath = function(session, id) {
-	this.id = id;
-	this.session = session;
-}
-
-var listFiles = function(path, cb) {
-
-	if(path instanceof FsPath) {
-		fs.readdir(path.path, function(err, itemnames) {
-			if(err) return cb(err);
-			itemnames.sort();
-			var files = new Array(itemnames.length);
-			for(var i = 0 ; i < itemnames.length ; ++i) {
-				files[i] = {};
-			}
-			async.forEachOf(itemnames, function(itemname, index, cb) {
-				fs.open(path.path + "/" + itemname, "r", function(err, fd) {
+FsCursor.prototype.listFiles = function(cb) {
+	debug("FsCursor.listFiles");
+	var self = this;
+	fs.readdir(self.currentPath, function(err, itemnames) {
+		if(err) return cb(err);
+		itemnames.sort();
+		var files = new Array(itemnames.length);
+		for(var i = 0 ; i < itemnames.length ; ++i) {
+			files[i] = {};
+		}
+		async.forEachOf(itemnames, function(itemname, index, cb) {
+			fs.open(path.join(self.currentPath, itemname), "r", function(err, fd) {
+				if(err) return cb(err);
+				fs.fstat(fd, function(err, stats) {
 					if(err) return cb(err);
-					fs.fstat(fd, function(err, stats) {
-						if(err) return cb(err);
-						files[index].size = stats.size;
-						files[index].name = itemname;
-						files[index].isDirectory = stats.isDirectory();
-						if(!stats.isDirectory()) {
-							var fileStream = fs.createReadStream("", { fd: fd });
-							var hash = crypto.createHash('md5');	
-							hash.setEncoding('hex');
-							fileStream.pipe(hash);
-							fileStream.on('end', function() {
-								hash.end();
-								files[index].md5 = hash.read();
-								cb(null);
-							});
-						} else cb(null);
-					});
+					files[index].size = stats.size;
+					files[index].name = itemname;
+					files[index].isDirectory = stats.isDirectory();
+					if(!stats.isDirectory()) {
+						var fileStream = fs.createReadStream("", { fd: fd });
+						var hash = crypto.createHash('md5');	
+						hash.setEncoding('hex');
+						fileStream.pipe(hash);
+						fileStream.on('end', function() {
+							hash.end();
+							files[index].md5 = hash.read();
+							cb(null);
+						});
+					} else cb(null);
 				});
-
-			}, function(err) {
-				cb(err, files);
 			});
 
+		}, function(err) {
+			cb(err, files);
 		});
-	} else if(path instanceof AcPath) {
-		path.session.list_children(path.id, null, function(err, items) {
-		});
-	}
-	
+
+	});
+};
+
+FsCursor.prototype.createFile = function(name, stream, size, cb) {
+	debug("FsCursor.createFile %s, %d", name, size);
+	var self = this;
+	var wstream = fs.createWriteStream(path.join(self.currentPath, name));
+	wstream.on("finish", function() {
+		cb(null);
+	});
+	wstream.on("error", function(err) {
+		cb(err);
+	});
+	stream.pipe(wstream);
 }
 
 
-var copyFile = function(pathFrom, name, pathTo, cb) {
-	debug("copyFile %j %s %j", pathFrom, name, pathTo);
-	if(pathFrom instanceof FsPath && pathTo instanceof FsPath) {
+FsCursor.prototype.readFile = function(item, cb) {
+	debug("FsCursor.readFile %s", item.name);
+	var self = this;
+	process.nextTick( function() {
+		var stream = fs.createReadStream(path.join(self.currentPath, item.name));
+		cb(null, stream);
+	});
+}
+
+FsCursor.prototype.deleteItem = function(item, cb) {
+	debug("FsCursor.deleteItem %s", item.name);
+	var self = this;
+	fs.unlink(path.join(self.currentPath, item.name), cb);
+}
+
+
+FsCursor.prototype.createFolder = function(name, cb) {
+	debug("FsCursor.createFolder %s", name);
+	var self = this;
+	var newPath = path.join(self.currentPath, name);
+	fs.mkdir(newPath, function(err) {
+		if(err) return cb(err);
+		return cb(err, new FsCursor(newPath));
+	});
+}
+
+FsCursor.prototype.moveTo = function(item, cb) {
+	debug("FsCursor.moveTo %s", item.name);
+	var self = this;
+	process.nextTick(function() {
+		cb(null, new FsCursor(path.join(self.currentPath, item.name)));
+	});
+}
+
+FsCursor.prototype.init = function(str, cb) {
+	debug("FsCursor.init %s", str);
+	var self = this;
+	process.nextTick( function() {
+		self.currentPath = str;
+		cb(null);
+	});
+}
+
+
+var AcdCursor = function(session, nodeid) {
+	this.session = session;
+	this.nodeid = nodeid;
+}
+
+AcdCursor.prototype._listFiles = function(startToken, files, cb) {
+	var self = this;
+	var list_children_options = { sort: '["name ASC"]' };
+	if(startToken) list_children_options.startToken = startToken;
+	self.session.list_children(self.nodeid, list_children_options, function(err, items) {
+		if(err) return cb(err);
+		items.data.forEach(function(child, index) {
+			var item = { name: child.name, nodeid: child.id, isDirectory: (child.kind === "FOLDER") };
+			if(child.kind !== "FOLDER") {
+				item.size = child.contentProperties.size;
+				item.md5 =  child.contentProperties.md5;
+			}
+			files.push(item);
+		});
+		if(items.nextToken) {
+			return self.listFiles(startToken, files, cb);
+		} else cb(null, files);
+
+	});
+};
+
+AcdCursor.prototype.listFiles = function(cb) {
+	debug("AcdCursor.listFiles");
+	var self = this;
+	return self._listFiles(null, [], cb);
+};
+
+
+AcdCursor.prototype.createFile = function(name, stream, size, cb) {
+	debug("AcdCursor.createFile %s", name);
+	var self = this;
+	self.session.upload({name: name, kind: "FILE", parents: [ self.nodeid ] }, stream, size, cb);
+}
+
+AcdCursor.prototype.readFile = function(item, cb) {
+	debug("AcdCursor.readFile %s", item.name);
+	var self = this;
+	var stream = new mstream.PassThrough();
+	process.nextTick( function() {
+		self.session.download(item.nodeid, stream, function(err) {
+			if(err) return stream.emit("error", err);
+		});
+		cb(null, stream);
+	});
+}
+
+AcdCursor.prototype.deleteItem = function(item, cb) {
+	debug("AcdCursor.deleteItem %s", item.name);
+	var self = this;
+	self.session.add_to_trash(item.nodeid, function(err, result) {
+		if(err) return cb(err);
+		return cb(null);
+	});
+}
+
+
+AcdCursor.prototype.createFolder = function(name, cb) {
+	debug("AcdCursor.createFolder %s", name);
+	var self = this;
+	self.session.create_folder({kind: "FOLDER", name: name, parents: [self.nodeid] }, function(err, folder) {
+		if(err) return cb(err);
+		return cb(err, new AcdCursor(self.session, folder.id));
+	});
+}
+
+AcdCursor.prototype.moveTo = function(item, cb) {
+	debug("AcdCursor.moveTo %s", item);
+	var self = this;
+	process.nextTick(function() {
+		cb(null, new AcdCursor(self.session, item.nodeid));
+	});
+}
+
+AcdCursor.prototype.init = function(str, cb) {
+	debug("AcdCursor.init %s", str);
+	var self = this;
+	self.session.resolve_path(str, function(err, result) {
+		if(err) return cb(err);
+		if(result.count === 0) return cb(new Error("ENOENT"));
+		self.nodeid = result.data[0].id;
+		cb(null);
+	});
+}
+
+var copyFile = function(cursorFrom, item, cursorTo, cb) {
+	debug("copyFile %j %s %j", cursorFrom, item.name, cursorTo);
+	cursorFrom.readFile(item, function(err, stream) {
 		var cbCalled = false;
-
-		var rd = fs.createReadStream(path.join(pathFrom.path, name));
-		rd.on("error", function(err) {
-				done(err);
+		stream.on("error", function(err) {
+			done(err);
 		});
-		var wr = fs.createWriteStream(path.join(pathTo.path, name));
-		wr.on("error", function(err) {
-				done(err);
+		cursorTo.createFile(item.name, stream, item.size, function(err) {
+			done(err);
 		});
-		wr.on("close", function(ex) {
-				done();
-		});
-		rd.pipe(wr);
-
 		function done(err) {
 			if (!cbCalled) {
+				console.log("calling callback %s", err);
 				cb(err);
 				cbCalled = true;
 			}
-		}		
-	} 
+		}
+	});
 }
 
-var overwriteFile = function(pathFrom, name, pathTo, cb) {
-	debug("overwriteFile %j %s %j", pathFrom, name, pathTo);
-	if(pathFrom instanceof FsPath && pathTo instanceof FsPath) {
-		copyFile(pathFrom, name, pathTo, cb);
-	} 
-}
-
-var deleteItem = function(basePath, name, cb) {
-	debug("deleteItem %j", basePath);
-	if(basePath instanceof FsPath) {
-		fs.unlink(path.join(basePath.path, name), cb);
-	} 
-}
-
-var createFolder = function(basePath, name, cb) {
-	debug("createFolder %j", basePath);
-	if(basePath instanceof FsPath) {
-		var newPath = path.join(basePath.path, name);
-		fs.mkdir(newPath, function(err) {
-			if(err) return cb(err);
-			return cb(err, new FsPath(newPath));
-		});
-	}
-}
-
-var pathJoin = function(basePath, name, cb) {
-	debug("pathJoin %j, %s", basePath, name);
-	if(basePath instanceof FsPath) {
-		process.nextTick(function() {
-			cb(null, new FsPath(path.join(basePath.path, name)));
-		});
-	}
+var deleteItem = function(cursor, item, cb) {
+	cursor.deleteItem(item, cb);
 }
 
 /*listFiles(new FsPath("."), function(err, files) {
 	console.log("%s, %j", err, files);
 });*/
 
-var rsync = function(options, pathFrom, pathTo, cb) {
-	debug("rsync %j", pathFrom, pathTo);
+var rsync = function(options, cursorFrom, cursorTo, cb) {
+	debug("rsync %j %j", cursorFrom, cursorTo);
 	async.parallel({
-		listFrom: listFiles.bind(null, pathFrom),
-		listTo: listFiles.bind(null, pathTo),
+		listFrom: cursorFrom.listFiles.bind(cursorFrom),
+		listTo: cursorTo.listFiles.bind(cursorTo),
 	},
 	function(err, results) {
 		if(err) return cb(err);
 		var fromIt = 0, toIt = 0;
-		var queue = async.queue(function(fun, cb) { fun(cb); });
-		queue.drain = cb;
+		var parallel = [];
 		for(; fromIt < results.listFrom.length || toIt < results.listTo.length ;) {
 			var series = [];
 
@@ -165,7 +263,7 @@ var rsync = function(options, pathFrom, pathTo, cb) {
 			) { // conflicting name
 				// delete/archive
 				series.push(function(toIt, cb) {
-					deleteItem(pathTo, results.listTo[toIt].name, cb);
+					deleteItem(cursorTo, results.listTo[toIt], cb);
 				}.bind(null, toIt));
 				toIt++;
 			} else if ( (
@@ -177,8 +275,8 @@ var rsync = function(options, pathFrom, pathTo, cb) {
 			) {
 				// delete/archive or do nothing - no dependencies (direct queue push)
 				if (options.deleteExtraneous) {
-					queue.push(function(toIt, cb) {
-						deleteItem(pathTo, results.listTo[toIt].name, cb);
+					parallel.push(function(toIt, cb) {
+						deleteItem(cursorTo, results.listTo[toIt], cb);
 					}.bind(null, toIt));
 				}
 				toIt++;
@@ -197,13 +295,13 @@ var rsync = function(options, pathFrom, pathTo, cb) {
 				)
 			) {	// rsync folder
 				if(results.listFrom[fromIt].isDirectory) {
-					queue.push(function(fromIt, toIt, cb) {
+					parallel.push(function(fromIt, toIt, cb) {
 						async.parallel({
-							subPathFrom: pathJoin.bind(null, pathFrom, results.listFrom[fromIt].name),
-							subPathTo: pathJoin.bind(null, pathTo, results.listTo[toIt].name)
+							subCursorFrom: cursorFrom.moveTo.bind(cursorFrom, results.listFrom[fromIt]),
+							subCursorTo: cursorTo.moveTo.bind(cursorTo, results.listTo[toIt])
 						}, function(err, results) {
 							if(err) return cb(err);
-							rsync(options, results.subPathFrom, results.subPathTo, cb);
+							rsync(options, results.subCursorFrom, results.subCursorTo, cb);
 						});
 					}.bind(null, fromIt, toIt));
 				}
@@ -216,26 +314,39 @@ var rsync = function(options, pathFrom, pathTo, cb) {
 				// copy & rsync
 				series.push(function(fromIt, cb) {
 					if(!results.listFrom[fromIt].isDirectory) {
-						copyFile(pathFrom, results.listFrom[fromIt].name, pathTo, cb);
+						copyFile(cursorFrom, results.listFrom[fromIt], cursorTo, cb);
 					} else {
 						async.parallel({
-							subPathFrom: pathJoin.bind(null, pathFrom, results.listFrom[fromIt].name),
-							subPathTo: createFolder.bind(null, pathTo, results.listFrom[fromIt].name)
+							subCursorFrom: cursorFrom.moveTo.bind(cursorFrom, results.listFrom[fromIt]),
+							subCursorTo: cursorTo.createFolder.bind(cursorTo, results.listFrom[fromIt].name)
 						}, function(err, results) {
 							if(err) return cb(err);
-							rsync(options, results.subPathFrom, results.subPathTo, cb);
+							rsync(options, results.subCursorFrom, results.subCursorTo, cb);
 						});
 					}
 				}.bind(null, fromIt));
-				queue.push(async.series.bind(null, series));
+				parallel.push(async.series.bind(null, series));
 				fromIt++;
 			}
 
 		}
+		async.parallel(parallel, cb);
 	});
 }
 
-rsync({}, new FsPath("a"), new FsPath("b"), function(err) {
+var fromCursor = new FsCursor(), fromLocation = "a";
+//var toCursor = new FsCursor(), toLocation = "b";
+var toCursor = new AcdCursor(session), toLocation = "/SyncTests";
+
+(function(cb) {
+	async.parallel([
+		fromCursor.init.bind(fromCursor, fromLocation),
+		toCursor.init.bind(toCursor, toLocation)
+	], function(err, results) {
+		if(err) return cb(err);
+		rsync({}, fromCursor, toCursor, cb);
+	});
+})(function (err){
 	console.log("rsync: %s", err || "SUCCESS");
 });
 

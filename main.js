@@ -113,7 +113,7 @@ session.resolve_path("/AcdcTests", function(err, folders) {
 		session.create_folder_path("/AcdcTests", function(err, folder) {
 			console.log("create_folder_path: %s, %j", err || "SUCCESS", folder);
 			assert.equal(err, null, "Folder could not be created");
-			session.upload( {name: "file-upload", kind: "FILE", parents: [ folder.id ] }, fs.createReadStream("file"), function(err, file) {
+			session.upload( {name: "file-upload", kind: "FILE", parents: [ folder.id ] }, fs.createReadStream("file"), null, function(err, file) {
 				console.log("upload: %s, %j", err || "SUCCESS", file);
 				assert.equal(err, null, "File could not be uploaded");
 				var fileStream = fs.createReadStream("file"), hash = crypto.createHash('md5');
@@ -124,7 +124,7 @@ session.resolve_path("/AcdcTests", function(err, folders) {
 					var computedHash = hash.read();
 					console.log("computed MD5: ", computedHash);
 					assert.equal(file.contentProperties.md5, computedHash, "MD5 hash do not match");
-					session.overwrite(file.id, fs.createReadStream("file2"), function(err, file) {
+					session.overwrite(file.id, fs.createReadStream("file2"), null, function(err, file) {
 						console.log("overwrite: %s, %j", err || "SUCCESS", file);
 						assert.equal(err, null, "File could not be overwritten");
 						session.create_folder( { name: "SubFolder", kind: "FOLDER", parents: [ folder.id ] }, function(err, subfolder) {
@@ -146,6 +146,9 @@ session.resolve_path("/AcdcTests", function(err, folders) {
 			});
 		});
 	};
+});
+
+1 || session.list({filters: 'kind:FILE'}, function(err, items) {
 });
 
 var util = require("util");
