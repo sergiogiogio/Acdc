@@ -98,11 +98,13 @@ Session.prototype.request = function(cb_pre, cb_opt, cb_req, cb_res) {
 				};
 				var req = https.request(token_request_opt, function(res) {
 					self.read_response(res, tokenRequestId, JSON.parse, function(err, token) {
+						if(err) return cb_res(err);
 						self.token = token;
 						self.emit("newToken", self.token);
 						self.request(cb_pre, cb_opt, cb_req, cb_res);
 					});
 				});
+				req.on("error", cb_res);
 				req.write(data);
 				req.end();
 				debugTransport("Request(%d): %j", tokenRequestId, token_request_opt);
@@ -120,6 +122,7 @@ Session.prototype.request = function(cb_pre, cb_opt, cb_req, cb_res) {
 	debugTransport("Request(%d): %j", requestId, req_options);
 	var logstream = new LogStream(requestId);
 	logstream.pipe(req);
+	req.on("error", cb_res);
 	cb_req(logstream);
 };
 
@@ -278,9 +281,9 @@ Session.prototype.create_folder_path = function(node_path, cb) {
 	
 }
 
-Session.prototype.upload = function(metadata, stream, streamlength, cb) {
+Session.prototype.upload = function(metadata, stream, streamlength, options, cb) {
 	var fname = "upload";
-	debug(fname + "(%j)", metadata);
+	debug(fname + "(%j, %d, %j)", metadata, streamlength, options);
 	var self = this;
 	
 	var form = new FormData();
@@ -294,7 +297,7 @@ Session.prototype.upload = function(metadata, stream, streamlength, cb) {
 			function(opt){
 				opt.host = url.parse(self.endpoint.contentUrl).host;
 				//opt.host = "localhost";
-				opt.path = url.parse(self.endpoint.contentUrl).pathname + "nodes";
+				opt.path = url.parse(self.endpoint.contentUrl).pathname + "nodes" + (options ? "?" + serialize(options) : "");
 				opt.method = "POST";
 				opt.headers['Content-Type'] = 'multipart/form-data; boundary=' + form.getBoundary();
 				opt.headers['Content-Length'] = length;
@@ -308,8 +311,8 @@ Session.prototype.upload = function(metadata, stream, streamlength, cb) {
 	});
 };
 
-Session.prototype.download = function(nodeid, stream, cb) {
-	var fname = "upload";
+Session.prototype.download = function(nodeid, cb) {
+	var fname = "download";
 	debug(fname + "(%s)", nodeid);
 	var self = this;
 	
@@ -322,8 +325,7 @@ Session.prototype.download = function(nodeid, stream, cb) {
 			req.end();
 		}, function(err, res, requestId) {
 			if(err) return call_cb(fname, cb, err);
-			res.pipe(stream);
-			call_cb(fname, cb, null);
+			call_cb(fname, cb, null, res);
 		}
 	);
 };

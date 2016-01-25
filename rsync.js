@@ -153,18 +153,15 @@ AcdCursor.prototype.listFiles = function(cb) {
 AcdCursor.prototype.createFile = function(name, stream, size, cb) {
 	debug("AcdCursor.createFile %s", name);
 	var self = this;
-	self.session.upload({name: name, kind: "FILE", parents: [ self.nodeid ] }, stream, size, cb);
+	self.session.upload({name: name, kind: "FILE", parents: [ self.nodeid ] }, stream, size, { suppress: "deduplication" }, cb);
 }
 
 AcdCursor.prototype.readFile = function(item, cb) {
 	debug("AcdCursor.readFile %s", item.name);
 	var self = this;
-	var stream = new mstream.PassThrough();
-	process.nextTick( function() {
-		self.session.download(item.nodeid, stream, function(err) {
-			if(err) return stream.emit("error", err);
-		});
-		cb(null, stream);
+	self.session.download(item.nodeid, function(err, stream) {
+		if(err) return cb(err);
+		return cb(null, stream);
 	});
 }
 
@@ -226,15 +223,49 @@ var copyFile = function(cursorFrom, item, cursorTo, cb) {
 	});
 }
 
-var deleteItem = function(cursor, item, cb) {
-	cursor.deleteItem(item, cb);
+var deleteItem = function(cursor, item, lazyCursor, cb) {
+	lazyCursor.get(function(err, archiveCursor) {
+		if(err) return cb(err);
+		copyFile(cursor, item, archiveCursor, function(err) {
+			if(err) return cb(err);
+			cursor.deleteItem(item, cb);
+		});
+	});
+}
+
+var LazyCursor = function(cursor, name) {
+	if(name) {
+		this.lazyParentCursor = cursor;
+		this.name = name;
+	} else {
+		this.cursor = cursor;
+	}
+}
+
+LazyCursor.prototype.get = function(cb) {
+	var self = this;
+	if(self.cursor) {
+		return process.nextTick (function() {
+			cb(null, self.cursor);
+		});
+	} else {
+		self.lazyParentCursor.get(function(err, parentCursor) {
+			if(err) return cb(err);
+			parentCursor.createFolder(self.name, function(err, cursor) {
+				if(err) return cb(err);
+				self.cursor = cursor;
+				self.get(cb);
+			});
+			
+		});
+	}
 }
 
 /*listFiles(new FsPath("."), function(err, files) {
 	console.log("%s, %j", err, files);
 });*/
 
-var rsync = function(options, cursorFrom, cursorTo, cb) {
+var rsync = function(options, cursorFrom, cursorTo, lazyCursorArchive, cb) {
 	debug("rsync %j %j", cursorFrom, cursorTo);
 	async.parallel({
 		listFrom: cursorFrom.listFiles.bind(cursorFrom),
@@ -263,7 +294,7 @@ var rsync = function(options, cursorFrom, cursorTo, cb) {
 			) { // conflicting name
 				// delete/archive
 				series.push(function(toIt, cb) {
-					deleteItem(cursorTo, results.listTo[toIt], cb);
+					deleteItem(cursorTo, results.listTo[toIt], lazyCursorArchive, cb);
 				}.bind(null, toIt));
 				toIt++;
 			} else if ( (
@@ -276,7 +307,7 @@ var rsync = function(options, cursorFrom, cursorTo, cb) {
 				// delete/archive or do nothing - no dependencies (direct queue push)
 				if (options.deleteExtraneous) {
 					parallel.push(function(toIt, cb) {
-						deleteItem(cursorTo, results.listTo[toIt], cb);
+						deleteItem(cursorTo, results.listTo[toIt], lazyCursorArchive, cb);
 					}.bind(null, toIt));
 				}
 				toIt++;
@@ -299,9 +330,9 @@ var rsync = function(options, cursorFrom, cursorTo, cb) {
 						async.parallel({
 							subCursorFrom: cursorFrom.moveTo.bind(cursorFrom, results.listFrom[fromIt]),
 							subCursorTo: cursorTo.moveTo.bind(cursorTo, results.listTo[toIt])
-						}, function(err, results) {
+						}, function(err, subResults) {
 							if(err) return cb(err);
-							rsync(options, results.subCursorFrom, results.subCursorTo, cb);
+							rsync(options, subResults.subCursorFrom, subResults.subCursorTo, new LazyCursor(lazyCursorArchive, results.listFrom[fromIt].name), cb);
 						});
 					}.bind(null, fromIt, toIt));
 				}
@@ -319,9 +350,9 @@ var rsync = function(options, cursorFrom, cursorTo, cb) {
 						async.parallel({
 							subCursorFrom: cursorFrom.moveTo.bind(cursorFrom, results.listFrom[fromIt]),
 							subCursorTo: cursorTo.createFolder.bind(cursorTo, results.listFrom[fromIt].name)
-						}, function(err, results) {
+						}, function(err, subResults) {
 							if(err) return cb(err);
-							rsync(options, results.subCursorFrom, results.subCursorTo, cb);
+							rsync(options, subResults.subCursorFrom, subResults.subCursorTo, new LazyCursor(lazyCursorArchive, results.listFrom[fromIt].name), cb);
 						});
 					}
 				}.bind(null, fromIt));
@@ -335,16 +366,24 @@ var rsync = function(options, cursorFrom, cursorTo, cb) {
 }
 
 var fromCursor = new FsCursor(), fromLocation = "a";
-//var toCursor = new FsCursor(), toLocation = "b";
-var toCursor = new AcdCursor(session), toLocation = "/SyncTests";
+//var fromCursor = new AcdCursor(session), fromLocation = "/SyncTests";
+
+
+var toCursor = new FsCursor(), toLocation = "b";
+//var toCursor = new AcdCursor(session), toLocation = "/SyncTests2";
+
+
+var archiveCursor = new FsCursor(), archiveLocation = "archive";
+//var archiveCursor = new AcdCursor(session), archiveLocation = "/SyncTests2";
 
 (function(cb) {
 	async.parallel([
 		fromCursor.init.bind(fromCursor, fromLocation),
-		toCursor.init.bind(toCursor, toLocation)
+		toCursor.init.bind(toCursor, toLocation),
+		archiveCursor.init.bind(archiveCursor, archiveLocation)
 	], function(err, results) {
 		if(err) return cb(err);
-		rsync({}, fromCursor, toCursor, cb);
+		rsync({}, fromCursor, toCursor, new LazyCursor(archiveCursor), cb);
 	});
 })(function (err){
 	console.log("rsync: %s", err || "SUCCESS");

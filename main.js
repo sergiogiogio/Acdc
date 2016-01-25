@@ -113,7 +113,7 @@ session.resolve_path("/AcdcTests", function(err, folders) {
 		session.create_folder_path("/AcdcTests", function(err, folder) {
 			console.log("create_folder_path: %s, %j", err || "SUCCESS", folder);
 			assert.equal(err, null, "Folder could not be created");
-			session.upload( {name: "file-upload", kind: "FILE", parents: [ folder.id ] }, fs.createReadStream("file"), null, function(err, file) {
+			session.upload( {name: "file-upload", kind: "FILE", parents: [ folder.id ] }, fs.createReadStream("file"), null, null, function(err, file) {
 				console.log("upload: %s, %j", err || "SUCCESS", file);
 				assert.equal(err, null, "File could not be uploaded");
 				var fileStream = fs.createReadStream("file"), hash = crypto.createHash('md5');
