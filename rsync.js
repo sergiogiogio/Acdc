@@ -278,6 +278,100 @@ var rsync = function(options, cursorFrom, cursorTo, lazyCursorArchive, cb) {
 		for(; fromIt < results.listFrom.length || toIt < results.listTo.length ;) {
 			var series = [];
 
+			function(savFromIt, savToIt) {
+				var opCopy = function(isDirectory, cb) {
+					var item = results.listFrom[savFromIt];
+					if(isDirectory) {
+						copyFile(cursorFrom, item, cursorTo, cb);
+					} else {
+						async.parallel({
+							from: cursorFrom.moveTo.bind(cursorFrom, item),
+							to: cursorTo.createFolder.bind(cursorTo, item.name)
+						}, function(err, subResults) {
+							if(err) return cb(err);
+							rsync(options, subResults.from, subResults.to, new LazyCursor(lazyCursorArchive, item.name), cb);
+						});
+					}
+				}
+				var opDelete = function(cb) {
+					deleteItem(cursorTo, results.listTo[savToIt], lazyCursorArchive, cb);
+				} 
+				var opReplace = function(isDirectory, cb) {
+					opDelete(function(err, result) {
+						if (err) return cb(err);
+						opCopy(isDirectory);
+					}
+				}
+				var opRsync = function(cb) {
+					async.parallel({
+						subCursorFrom: cursorFrom.moveTo.bind(cursorFrom, results.listFrom[savFromIt]),
+						subCursorTo: cursorTo.moveTo.bind(cursorTo, results.listTo[savToIt])
+					}, function(err, subResults) {
+						if(err) return cb(err);
+						rsync(options, subResults.subCursorFrom, subResults.subCursorTo, new LazyCursor(lazyCursorArchive, results.listFrom[savFromIt].name), cb);
+					});
+				} 
+
+				if(
+					(fromIt < results.listFrom.length && toIt < results.listTo.length && results.listFrom[fromIt].name < results.listTo[toIt].name) ||
+					(fromIt < results.listFrom.length && toIt === results.listTo.length)
+				) {
+					queue.push(function(cb) {
+						cursorFrom.isDirectory(results.listFrom[savFromIt], function(err, isDirectory) {
+							if(err) return cb(err);
+							opCopy(isDirectory, cb);
+						});
+					});
+					fromIt++;
+				} else if(
+					(fromIt < results.listFrom.length && toIt < results.listTo.length && results.listFrom[fromIt].name > results.listTo[toIt].name) ||
+					(fromIt === results.listFrom.length && toIt < results.listTo.length)
+				) {
+					// delete/archive or do nothing - no dependencies (direct queue push)
+					if (options.deleteExtraneous) {
+						queue.push(opDelete);
+					}
+					toIt++;
+				} else { // same name
+					async.parallel({
+						from: cursorFrom.isDirectory.bind(cursorFrom, results.listFrom[savFromIt]),
+						to: cursorTo.isDirectory.bind(cursorTo, results.listTo[savToIt])
+					}, function(err, isDirectoryResults) {
+						if(err) return cb(err);
+						if(isDirectoryResults.from !== isDirectoryResults.to) {
+							// replace
+							queue.push(opReplace.bind(null, isDirectoryResults.from));		
+						} else {
+							async.parallel({
+								from: cursorFrom.getLength.bind(cursorFrom, results.listFrom[savFromIt]),
+								to: cursorTo.getLength.bind(cursorTo, results.listTo[savToIt])
+							}, function(err, getLengthResults) {
+								if(err) return cb(err);
+								if(getLengthResults.from !== getLengthResults.to) {
+									// replace
+									queue.push(opReplace.bind(null, isDirectoryResults.from));		
+								} else {
+									async.parallel({
+										from: cursorFrom.getMD5.bind(cursorFrom, results.listFrom[savFromIt]),
+										to: cursorTo.getMD5.bind(cursorTo, results.listTo[savToIt])
+									}, function(err, getMD5Results) {
+										if(err) return cb(err);
+										if(getMD5Results.from !== getMD5Results.to) {
+											// replace
+											queue.push(opReplace.bind(null, isDirectoryResults.from));		
+										} else {
+											// rsync folders only
+											queue.
+										}
+									});
+								}
+							});
+						}
+					});
+					fromIt++; toIt++;
+				}
+			}(fromIt, toIt);
+				
 			if(	(
 					fromIt < results.listFrom.length && toIt < results.listTo.length &&
 					results.listFrom[fromIt].name === results.listTo[toIt].name && // same name
