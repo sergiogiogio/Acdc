@@ -1,4 +1,4 @@
-'use strict'
+use strict'
 
 var assert = require('assert');
 
@@ -265,7 +265,7 @@ LazyCursor.prototype.get = function(cb) {
 	console.log("%s, %j", err, files);
 });*/
 
-var rsync = function(options, cursorFrom, cursorTo, lazyCursorArchive, cb) {
+var rsync = function(options, cursorFrom, cursorTo, lazyCursorArchive, queue, cb) {
 	debug("rsync %j %j", cursorFrom, cursorTo);
 	async.parallel({
 		listFrom: cursorFrom.listFiles.bind(cursorFrom),
@@ -273,13 +273,10 @@ var rsync = function(options, cursorFrom, cursorTo, lazyCursorArchive, cb) {
 	},
 	function(err, results) {
 		if(err) return cb(err);
+		queue = queue
 		var fromIt = 0, toIt = 0;
-		var parallel = [];
-		for(; fromIt < results.listFrom.length || toIt < results.listTo.length ;) {
-			var series = [];
-
 		var loop = function(fromIt, isDirectory, toIt, cb) {
-			var savFromIt = fromIt;
+			var nextFromIt = fromIt, nextToIt = toIt;
 			if(!isDirectory && fromIt < results.listFrom.length)
 				return cursorFrom.isDirectory(results.listFrom[fromIt], function(err, isDirectory) {
 						if(err) return cb(err);
@@ -321,25 +318,25 @@ var rsync = function(options, cursorFrom, cursorTo, lazyCursorArchive, cb) {
 				(fromIt < results.listFrom.length && toIt < results.listTo.length && results.listFrom[fromIt].name < results.listTo[toIt].name) ||
 				(fromIt < results.listFrom.length && toIt === results.listTo.length)
 			) {
-				queue.push(opCopy);
-				fromIt++;
+				opCopy(cb);
+				nextFromIt++;
 			} else if(
 				(fromIt < results.listFrom.length && toIt < results.listTo.length && results.listFrom[fromIt].name > results.listTo[toIt].name) ||
 				(fromIt === results.listFrom.length && toIt < results.listTo.length)
 			) {
 				// delete/archive or do nothing - no dependencies (direct queue push)
 				if (options.deleteExtraneous) {
-					queue.push(opDelete);
+					opDelete(cb);
 				}
-				toIt++;
+				nextToIt++;
 			} else { // same name
 				cursorTo.isDirectory(function(err, isDirectoryTo) {
 					if(err) return cb(err);
 					if(isDirectory !== isDirectoryTo) {
 						// replace
-						queue.push(opReplace);		
+						opReplace(cb);		
 					} else if(isDirectory) {
-						queue.push(opRsync);		
+						opRsync(cb);		
 					} else {
 						async.parallel({
 							from: cursorFrom.getLength.bind(cursorFrom, results.listFrom[fromIt]),
@@ -348,7 +345,7 @@ var rsync = function(options, cursorFrom, cursorTo, lazyCursorArchive, cb) {
 							if(err) return cb(err);
 							if(getLengthResults.from !== getLengthResults.to) {
 								// replace
-								queue.push(opReplace);		
+								opReplace(cb);		
 							} else {
 								async.parallel({
 									from: cursorFrom.getMD5.bind(cursorFrom, results.listFrom[fromIt]),
@@ -357,25 +354,30 @@ var rsync = function(options, cursorFrom, cursorTo, lazyCursorArchive, cb) {
 									if(err) return cb(err);
 									if(getMD5Results.from !== getMD5Results.to) {
 										// replace
-										queue.push(opReplace);		
+										opReplace(cb);		
+									} else {
+										cb(null);
 									}
-									
 								});
 							}
 						});
 					}
-					}
 				});
-				fromIt++; toIt++;
+				nextFromIt++; nextToIt++;
 			}
 			if(fromIt < results.listFrom.length || toIt < results.listTo.length) {
-				queue.push(loop.bind(null, fromIt, (savFromIt == fromIt) ? isDirectory : null, toIt));
+				queue.push(loop.bind(null, nextFromIt, (nextFromIt == fromIt) ? isDirectory : null, nextToIt));
 			}
-			cb(null);
 		};
 		
 		if(fromIt < results.listFrom.length || toIt < results.listTo.length) {
 			queue.push(loop.bind(null, fromIt, null, toIt));
+			queue.push(function(cb) {
+				loop(fromIt, toIt, function(err) {
+					cb(err);
+					if(--loopCount === 0) mainCb(null);
+				});
+			});
 		}
 
 		
