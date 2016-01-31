@@ -1,4 +1,4 @@
-use strict'
+'use strict'
 
 var assert = require('assert');
 
@@ -72,6 +72,37 @@ FsCursor.prototype.createFile = function(name, stream, size, cb) {
 	stream.pipe(wstream);
 }
 
+
+FsCursor.prototype.isDirectory = function(item, cb) {
+	debug("FsCursor.isDirectory %j", item);
+	var self = this;
+	fs.stat(path.join(self.currentPath, item.name), function(err, stats) {
+		if(err) return cb(err);
+		return cb(null, stats.isDirectory());
+	});
+}
+
+FsCursor.prototype.getLength = function(item, cb) {
+	debug("FsCursor.getLength %s", item.name);
+	var self = this;
+	fs.stat(path.join(self.currentPath, item.name), function(err, stats) {
+		if(err) return cb(err);
+		return cb(null, stats.size);
+	});
+}
+
+FsCursor.prototype.getMD5 = function(item, cb) {
+	debug("FsCursor.getMD5 %s", item.name);
+	var self = this;
+	var fileStream = fs.createReadStream(path.join(self.currentPath, item.name));
+	var hash = crypto.createHash('md5');	
+	hash.setEncoding('hex');
+	fileStream.pipe(hash);
+	fileStream.on('end', function() {
+		hash.end();
+		cb(null, hash.read());
+	});
+}
 
 FsCursor.prototype.readFile = function(item, cb) {
 	debug("FsCursor.readFile %s", item.name);
@@ -224,6 +255,7 @@ var copyFile = function(cursorFrom, item, cursorTo, cb) {
 }
 
 var deleteItem = function(cursor, item, lazyCursor, cb) {
+	debug("deleteItem %j %s %j", cursor, item.name, lazyCursor);
 	lazyCursor.get(function(err, archiveCursor) {
 		if(err) return cb(err);
 		copyFile(cursor, item, archiveCursor, function(err) {
@@ -265,7 +297,41 @@ LazyCursor.prototype.get = function(cb) {
 	console.log("%s, %j", err, files);
 });*/
 
-var rsync = function(options, cursorFrom, cursorTo, lazyCursorArchive, queue, cb) {
+
+var queue = async.queue(function(fun, cb) { console.log("start queue fun"); fun(cb); }, 1);
+
+var rsync = function(options, cursorFrom, cursorTo, lazyCursorArchive, maincb) {
+
+	var errQueue = null;
+
+	queue.drain = function() {
+		console.log('all items have been processed');
+	}
+	var openTasks = 0;
+	var pushTask = function(task) {
+		openTasks++;
+		console.log("openTasks: %j %j %d", cursorFrom, cursorTo, openTasks);
+		queue.push(function(cb) {
+			if(errQueue) return cb(err);
+			task(function(err) {
+				openTasks--;
+				console.log("closeTasks: %j %j %d -> %d", cursorFrom, cursorTo, openTasks, queue.running());
+				errQueue = err;
+				console.log("error: %s", errQueue);
+				cb(err);
+				if(err) return maincb(err);
+				if(!openTasks) maincb();
+			});
+		});
+		console.log("task pushed!");
+	}
+
+	pushTask (
+		rsync_core.bind(null, options, cursorFrom, cursorTo, lazyCursorArchive, pushTask)
+	);
+};
+
+var rsync_core = function(options, cursorFrom, cursorTo, lazyCursorArchive, pushTask, cb) {
 	debug("rsync %j %j", cursorFrom, cursorTo);
 	async.parallel({
 		listFrom: cursorFrom.listFiles.bind(cursorFrom),
@@ -273,19 +339,24 @@ var rsync = function(options, cursorFrom, cursorTo, lazyCursorArchive, queue, cb
 	},
 	function(err, results) {
 		if(err) return cb(err);
-		queue = queue
-		var fromIt = 0, toIt = 0;
+		
 		var loop = function(fromIt, isDirectory, toIt, cb) {
+			if(fromIt == results.listFrom.length && toIt == results.listTo.length) {
+				console.log("nothing to do..." );
+				return process.nextTick(cb.bind(null,null));
+			}
 			var nextFromIt = fromIt, nextToIt = toIt;
-			if(!isDirectory && fromIt < results.listFrom.length)
+			if(isDirectory === null && fromIt < results.listFrom.length) {
+				console.log("request isDirectory" );
 				return cursorFrom.isDirectory(results.listFrom[fromIt], function(err, isDirectory) {
 						if(err) return cb(err);
-						loop(fromIt, isDirectory, toIt, cb);
+						return loop(fromIt, isDirectory, toIt, cb);
 					});
-
+			}
+			console.log("start loop" );
 			var opCopy = function(cb) {
 				var item = results.listFrom[fromIt];
-				if(isDirectory) {
+				if(!isDirectory) {
 					copyFile(cursorFrom, item, cursorTo, cb);
 				} else {
 					async.parallel({
@@ -293,16 +364,14 @@ var rsync = function(options, cursorFrom, cursorTo, lazyCursorArchive, queue, cb
 						to: cursorTo.createFolder.bind(cursorTo, item.name)
 					}, function(err, subResults) {
 						if(err) return cb(err);
-						rsync(options, subResults.from, subResults.to, new LazyCursor(lazyCursorArchive, item.name), cb);
+						rsync_core(options, subResults.from, subResults.to, new LazyCursor(lazyCursorArchive, item.name), pushTask, cb);
 					});
 				}
 			}
 			var opDelete = function(cb) {
 				deleteItem(cursorTo, results.listTo[toIt], lazyCursorArchive, cb);
 			} 
-			var opReplace = async.series([
-				opDelete,
-				opCopy]);
+			var opReplace = async.seq(opDelete, opCopy);
 
 			var opRsync = function(cb) {
 				async.parallel({
@@ -310,7 +379,8 @@ var rsync = function(options, cursorFrom, cursorTo, lazyCursorArchive, queue, cb
 					subCursorTo: cursorTo.moveTo.bind(cursorTo, results.listTo[toIt])
 				}, function(err, subResults) {
 					if(err) return cb(err);
-					rsync(options, subResults.subCursorFrom, subResults.subCursorTo, new LazyCursor(lazyCursorArchive, results.listFrom[fromIt].name), cb);
+					console.log("calling rsync...");
+					rsync_core(options, subResults.subCursorFrom, subResults.subCursorTo, new LazyCursor(lazyCursorArchive, results.listFrom[fromIt].name), pushTask, cb);
 				});
 			} 
 
@@ -318,7 +388,7 @@ var rsync = function(options, cursorFrom, cursorTo, lazyCursorArchive, queue, cb
 				(fromIt < results.listFrom.length && toIt < results.listTo.length && results.listFrom[fromIt].name < results.listTo[toIt].name) ||
 				(fromIt < results.listFrom.length && toIt === results.listTo.length)
 			) {
-				opCopy(cb);
+				opCopy (cb);
 				nextFromIt++;
 			} else if(
 				(fromIt < results.listFrom.length && toIt < results.listTo.length && results.listFrom[fromIt].name > results.listTo[toIt].name) ||
@@ -326,17 +396,24 @@ var rsync = function(options, cursorFrom, cursorTo, lazyCursorArchive, queue, cb
 			) {
 				// delete/archive or do nothing - no dependencies (direct queue push)
 				if (options.deleteExtraneous) {
-					opDelete(cb);
+					opDelete (cb);
+				} else {
+					process.nextTick(function() {
+						cb(null);
+					});
 				}
 				nextToIt++;
 			} else { // same name
-				cursorTo.isDirectory(function(err, isDirectoryTo) {
+				cursorTo.isDirectory(results.listTo[toIt], function(err, isDirectoryTo) {
 					if(err) return cb(err);
+					console.log("isDirectory: %d %d" , isDirectory, isDirectoryTo);
 					if(isDirectory !== isDirectoryTo) {
 						// replace
+						console.log("we replace");
 						opReplace(cb);		
 					} else if(isDirectory) {
-						opRsync(cb);		
+						console.log("we sync");
+						opRsync(cb);
 					} else {
 						async.parallel({
 							from: cursorFrom.getLength.bind(cursorFrom, results.listFrom[fromIt]),
@@ -345,6 +422,7 @@ var rsync = function(options, cursorFrom, cursorTo, lazyCursorArchive, queue, cb
 							if(err) return cb(err);
 							if(getLengthResults.from !== getLengthResults.to) {
 								// replace
+								console.log("we replace");
 								opReplace(cb);		
 							} else {
 								async.parallel({
@@ -354,8 +432,10 @@ var rsync = function(options, cursorFrom, cursorTo, lazyCursorArchive, queue, cb
 									if(err) return cb(err);
 									if(getMD5Results.from !== getMD5Results.to) {
 										// replace
+										console.log("we replace");
 										opReplace(cb);		
 									} else {
+										console.log("we do nothing");
 										cb(null);
 									}
 								});
@@ -365,107 +445,10 @@ var rsync = function(options, cursorFrom, cursorTo, lazyCursorArchive, queue, cb
 				});
 				nextFromIt++; nextToIt++;
 			}
-			if(fromIt < results.listFrom.length || toIt < results.listTo.length) {
-				queue.push(loop.bind(null, nextFromIt, (nextFromIt == fromIt) ? isDirectory : null, nextToIt));
-			}
+			pushTask( loop.bind(null, nextFromIt, (nextFromIt == fromIt) ? isDirectory : null, nextToIt) );
 		};
+		loop(0, null, 0, cb);
 		
-		if(fromIt < results.listFrom.length || toIt < results.listTo.length) {
-			queue.push(loop.bind(null, fromIt, null, toIt));
-			queue.push(function(cb) {
-				loop(fromIt, toIt, function(err) {
-					cb(err);
-					if(--loopCount === 0) mainCb(null);
-				});
-			});
-		}
-
-		
-				
-			if(	(
-					fromIt < results.listFrom.length && toIt < results.listTo.length &&
-					results.listFrom[fromIt].name === results.listTo[toIt].name && // same name
-					(
-						results.listFrom[fromIt].isDirectory !== results.listTo[toIt].isDirectory || // different type, or
-						(
-							!results.listFrom[fromIt].isDirectory && ( // (for files only)
-								results.listFrom[fromIt].size !== results.listTo[toIt].size || // different size, or
-								results.listFrom[fromIt].md5 !== results.listTo[toIt].md5 // different hash
-							)
-						)
-					)
-				)
-			) { // conflicting name
-				// delete/archive
-				series.push(function(toIt, cb) {
-					deleteItem(cursorTo, results.listTo[toIt], lazyCursorArchive, cb);
-				}.bind(null, toIt));
-				toIt++;
-			} else if ( (
-					fromIt < results.listFrom.length && toIt < results.listTo.length && // extraneous in To
-					results.listFrom[fromIt].name > results.listTo[toIt].name
-				) || (
-					fromIt >= results.listFrom.length // extraneous in To
-				)
-			) {
-				// delete/archive or do nothing - no dependencies (direct queue push)
-				if (options.deleteExtraneous) {
-					parallel.push(function(toIt, cb) {
-						deleteItem(cursorTo, results.listTo[toIt], lazyCursorArchive, cb);
-					}.bind(null, toIt));
-				}
-				toIt++;
-			}
-
-			if(	fromIt < results.listFrom.length && toIt < results.listTo.length &&
-				results.listFrom[fromIt].name === results.listTo[toIt].name && // same name
-				(
-					results.listFrom[fromIt].isDirectory === results.listTo[toIt].isDirectory && // same type, and
-					(
-						results.listFrom[fromIt].isDirectory || ( // (for files only)
-							results.listFrom[fromIt].size === results.listTo[toIt].size && // same size, and
-							results.listFrom[fromIt].md5 === results.listTo[toIt].md5 // same hash
-						)
-					)
-				)
-			) {	// rsync folder
-				if(results.listFrom[fromIt].isDirectory) {
-					parallel.push(function(fromIt, toIt, cb) {
-						async.parallel({
-							subCursorFrom: cursorFrom.moveTo.bind(cursorFrom, results.listFrom[fromIt]),
-							subCursorTo: cursorTo.moveTo.bind(cursorTo, results.listTo[toIt])
-						}, function(err, subResults) {
-							if(err) return cb(err);
-							rsync(options, subResults.subCursorFrom, subResults.subCursorTo, new LazyCursor(lazyCursorArchive, results.listFrom[fromIt].name), cb);
-						});
-					}.bind(null, fromIt, toIt));
-				}
-				// do nothing to files
-				fromIt++; toIt++;
-			} else if(fromIt < results.listFrom.length && 
-					(toIt >= results.listTo.length ||
-					results.listFrom[fromIt].name < results.listTo[toIt].name)
-				) {
-				// copy & rsync
-				series.push(function(fromIt, cb) {
-					if(!results.listFrom[fromIt].isDirectory) {
-						copyFile(cursorFrom, results.listFrom[fromIt], cursorTo, cb);
-					} else {
-						async.parallel({
-							subCursorFrom: cursorFrom.moveTo.bind(cursorFrom, results.listFrom[fromIt]),
-							subCursorTo: cursorTo.createFolder.bind(cursorTo, results.listFrom[fromIt].name)
-						}, function(err, subResults) {
-							if(err) return cb(err);
-							rsync(options, subResults.subCursorFrom, subResults.subCursorTo, new LazyCursor(lazyCursorArchive, results.listFrom[fromIt].name), cb);
-						});
-					}
-				}.bind(null, fromIt));
-				parallel.push(async.series.bind(null, series));
-				fromIt++;
-			}
-
-		}
-		async.parallel(parallel, cb);
 	});
 }
 
@@ -493,5 +476,12 @@ var archiveCursor = new FsCursor(), archiveLocation = "archive";
 	console.log("rsync: %s", err || "SUCCESS");
 });
 
+process.on('beforeExit', function() {
+	console.log("beforeExit: queue %d %d %d", queue.started, queue.running(), queue.length());
+});
+
+process.on('exit', function() {
+	console.log("exit: queue %d %d %d", queue.started, queue.running(), queue.length());
+});
 var util = require("util");
 process.on('SIGINT', function() { console.log( util.inspect(process._getActiveHandles()) ); console.log(process._getActiveHandles()[0].constructor.name); console.log( util.inspect(process._getActiveRequests()) ); process.exit(); });
