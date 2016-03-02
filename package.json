@@ -4,7 +4,9 @@
   "dependencies": {
     "debug": "*",
     "form-data": "*",
-    "async": "*"
+    "async": "*",
+    "listen": "*",
+    "cookie": "*"
   },
   "description": "A proxy for chromecast",
   "main": "acdc.js",

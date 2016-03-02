@@ -6,6 +6,7 @@ var querystring = require('querystring');
 var util = require('util');
 var EventEmitter = require('events');
 var url = require('url');
+var cookie = require('cookie');
 var path = require('path');
 var FormData = require('form-data');
 var mstream = require('stream');
@@ -14,6 +15,7 @@ var debugTransport = require('debug')('acdc-api:transport');
 
 var Session = function(token) {
 	this.token = token;
+//	this.token = null;
 
 } 
 
@@ -31,7 +33,9 @@ Session.prototype.read_response = function(res, requestId, transform, cb) {
 		debugTransport("Response chunk(%d): %s", requestId, chunk);
 		result += chunk;
 	});
+	res.on('error', cb);
 	res.on('end', function() {
+		debugTransport("Response completed(%d)", requestId);
 		var tresult;
 		try {	
 			tresult = transform(result);
@@ -65,11 +69,88 @@ LogStream.prototype._transform = function(chunk, encoding, callback) {
 };
 
 var sRequestId = 0;
+Session.prototype.authorize = function(cb) {
+	var fname = "authorize";
+	debug(fname);
+	var self = this;
+	var sessionRequestId = sRequestId++;
+	var request_opt = {
+		host: "acdc-sergiogiogio.rhcloud.com",
+		path: "/get_session",
+		method: "GET"
+	};
+	var req = https.request(request_opt, function(res) {
+		debugTransport("Response(%d): %d, Headers: %j", sessionRequestId, res.statusCode, res.headers);
+		if(res.statusCode !== 200) return cb(new Error("Cannot connect"));
+		var parsedCookies = cookie.parse(res.headers["set-cookie"][0]);
+		console.log("please open browser https://acdc-sergiogiogio.rhcloud.com/authorize?session=" + parsedCookies.session);
+		var tokenRequestId = sRequestId++;
+		var request_opt = {
+			host: "acdc-sergiogiogio.rhcloud.com",
+			path: "/get_token",
+			method: "GET",
+			headers: {
+				'Cookie': cookie.serialize("session", parsedCookies.session)
+			}
+		};
+		var req = https.request(request_opt, function(res) {
+			debugTransport("Response(%d): %d, Headers: %j", tokenRequestId, res.statusCode, res.headers);
+			self.read_response(res, tokenRequestId, JSON.parse, function(err, token) {
+				if(err) return cb(err);
+				self.token = token;
+				self.emit("newToken", self.token);
+				cb();
+			});
+		})
+		req.on("error", cb);
+		req.end();
+		debugTransport("Request(%d): %j", tokenRequestId, request_opt);
+	});
+	req.on("error", cb);
+	req.end();
+	debugTransport("Request(%d): %j", sessionRequestId, request_opt);
+}
+Session.prototype.refresh_token = function(cb) {
+	var fname = "refresh_token";
+	debug(fname);
+	var self = this;
+	var data = querystring.stringify({
+		refresh_token: self.token.refresh_token
+	});
+	var requestId = sRequestId++;
+	var request_opt = {
+		host: "acdc-sergiogiogio.rhcloud.com",
+		path: "/refresh_token",
+		method: "POST",
+		headers: {
+			'Content-Type': 'application/x-www-form-urlencoded',
+			'Content-Length': Buffer.byteLength(data)
+		}
+	};
+	var req = https.request(request_opt, function(res) {
+		debugTransport("Response(%d): %d, Headers: %j", requestId, res.statusCode, res.headers);
+		self.read_response(res, requestId, JSON.parse, function(err, token) {
+			if(err) return cb(err);
+			self.token = token;
+			self.emit("newToken", self.token);
+			cb();
+		});
+	});
+	req.on("error", cb);
+	req.write(data);
+	req.end();
+	debugTransport("Request(%d): %j", requestId, request_opt);
+}
 Session.prototype.request = function(cb_pre, cb_opt, cb_req, cb_res) {
 	var self = this;
 	if(cb_pre) return cb_pre( function(err, result) {
 			if(err) return cb_res(err);
 			self.request(null, cb_opt, cb_req, cb_res);
+		});
+	if(!self.token) return self.authorize( function(err) {
+			console.log("Auth error %j", err);
+			if(err) return cb_res(err);
+			self.request(cb_pre, cb_opt, cb_req, cb_res);
 		});
 	var req_options = {
 		headers: {
@@ -83,31 +164,10 @@ Session.prototype.request = function(cb_pre, cb_opt, cb_req, cb_res) {
 		debugTransport("Response(%d): %d, Headers: %j", requestId, res.statusCode, res.headers);
 		switch(res.statusCode) {
 			case 401: {
-				var data = querystring.stringify({
-					refresh_token: self.token.refresh_token
-				});
-				var tokenRequestId = sRequestId++;
-				var token_request_opt = {
-					host: "acdc-1163.appspot.com",
-					path: "/",
-					method: "POST",
-					headers: {
-						'Content-Type': 'application/x-www-form-urlencoded',
-						'Content-Length': Buffer.byteLength(data)
-					}
-				};
-				var req = https.request(token_request_opt, function(res) {
-					self.read_response(res, tokenRequestId, JSON.parse, function(err, token) {
-						if(err) return cb_res(err);
-						self.token = token;
-						self.emit("newToken", self.token);
-						self.request(cb_pre, cb_opt, cb_req, cb_res);
-					});
-				});
-				req.on("error", cb_res);
-				req.write(data);
-				req.end();
-				debugTransport("Request(%d): %j", tokenRequestId, token_request_opt);
+				self.refresh_token( function(err) {
+					if(err) return cb_res(err);
+					self.request(cb_pre, cb_opt, cb_req, cb_res);
+				})
 			}
 			break;
 			case 200:
