@@ -204,6 +204,10 @@ Session.prototype.account_endpoint = function(cb) {
 	);
 };
 
+var escapeComponent = function(str) {
+	return str.replace(/([+\-&|!(){}\[\]^'\"~*?:\\])/g, "\\$1");
+}
+
 var serialize = function(obj) {
 	var str = [];
 	for(var p in obj)
@@ -284,7 +288,7 @@ Session.prototype.resolve_path = function(node_path, cb) {
 			self.request(self.refresh_endpoint.bind(self),
 				function(opt) {
 					opt.host = url.parse(self.endpoint.metadataUrl).host;
-					opt.path = url.parse(self.endpoint.metadataUrl).pathname + "nodes/" + result.data[0].id + "/children?filters=name:" + encodeURIComponent(parse.name);
+					opt.path = url.parse(self.endpoint.metadataUrl).pathname + "nodes/" + result.data[0].id + "/children?filters=name:" + encodeURIComponent(escapeComponent(parse.name));
 					opt.method = "GET"
 				}, function(req) {
 					req.end();
