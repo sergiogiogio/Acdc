@@ -205,7 +205,7 @@ Session.prototype.account_endpoint = function(cb) {
 };
 
 var escapeComponent = function(str) {
-	return str.replace(/([+\-&|!(){}\[\]^'\"~*?:\\])/g, "\\$1");
+	return str.replace(/([+\-&|!(){}\[\]^'\"~*?:\\ ])/g, "\\$1");
 }
 
 var serialize = function(obj) {
