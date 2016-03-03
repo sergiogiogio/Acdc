@@ -9,7 +9,7 @@
     "cookie": "*"
   },
   "description": "A proxy for chromecast",
-  "main": "acdc.js",
+  "main": "api.js",
   "directories": {
     "example": "examples"
   },
