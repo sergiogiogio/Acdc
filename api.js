@@ -64,7 +64,7 @@ var LogStream = function(requestId) {
 }
 util.inherits(LogStream, mstream.PassThrough);
 LogStream.prototype._transform = function(chunk, encoding, callback) {
-	debugTransport("Request chunk(%d): %s", this.requestId, chunk);
+	debugTransport("Request chunk(%d): %s", this.requestId, chunk.toString('ascii').replace(/[^\x20-\x7E]+/g, '.'));
 	return LogStream.super_.prototype._transform.call(this, chunk, encoding, callback);
 };
 
