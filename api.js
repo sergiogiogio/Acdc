@@ -284,7 +284,7 @@ Session.prototype.resolve_path = function(node_path, cb) {
 		default:
 		self.resolve_path(parse.dir, function(err, result) {
 			if(err) return call_cb(fname, cb, err);
-			if(result.count === 0) return call_cb(fname, err, result);
+			if(result.count === 0) return call_cb(fname, cb, err, result);
 			self.request(self.refresh_endpoint.bind(self),
 				function(opt) {
 					opt.host = url.parse(self.endpoint.metadataUrl).host;
