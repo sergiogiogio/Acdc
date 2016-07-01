@@ -95,6 +95,7 @@ Session.prototype.authorize = function(cb) {
 		};
 		var req = https.request(request_opt, function(res) {
 			debugTransport("Response(%d): %d, Headers: %j", tokenRequestId, res.statusCode, res.headers);
+			if(res.statusCode == 302) return self.authorize(cb); // we sometimes receive redirection to the same url
 			self.read_response(res, tokenRequestId, JSON.parse, function(err, token) {
 				if(err) return cb(err);
 				self.token = token;
@@ -129,6 +130,7 @@ Session.prototype.refresh_token = function(cb) {
 	};
 	var req = https.request(request_opt, function(res) {
 		debugTransport("Response(%d): %d, Headers: %j", requestId, res.statusCode, res.headers);
+		if(res.statusCode == 302) return self.refresh_token(cb); // we sometimes receive redirection to the same url
 		self.read_response(res, requestId, JSON.parse, function(err, token) {
 			if(err) return cb(err);
 			self.token = token;
