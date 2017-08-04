@@ -262,6 +262,24 @@ var AcdcError = function(code, message) {
 }
 
 
+Session.prototype.get_root = function(cb) {
+	var fname = "get_root";
+	debug(fname);
+	var self = this;
+	self.request(self.refresh_endpoint.bind(self),
+		function(opt) {
+			opt.host = url.parse(self.endpoint.metadataUrl).host;
+			opt.path = url.parse(self.endpoint.metadataUrl).pathname + "nodes?filters=" + encodeURIComponent("kind:FOLDER AND isRoot:true");
+			opt.method = "GET";
+		}, function(req) {
+			req.end();
+		}, function(err, res, requestId) {
+			if(err) return call_cb(fname, cb, err);
+			self.read_response(res, requestId, JSON.parse, call_cb.bind(null, fname, cb));
+		}
+	);
+}
+
 Session.prototype.resolve_path = function(node_path, cb) {
 	var fname = "resolve_path";
 	debug(fname + "(%s)", node_path);
@@ -290,7 +308,7 @@ Session.prototype.resolve_path = function(node_path, cb) {
 			self.request(self.refresh_endpoint.bind(self),
 				function(opt) {
 					opt.host = url.parse(self.endpoint.metadataUrl).host;
-					opt.path = url.parse(self.endpoint.metadataUrl).pathname + "nodes/" + result.data[0].id + "/children?filters=name:" + encodeURIComponent(escapeComponent(parse.name));
+					opt.path = url.parse(self.endpoint.metadataUrl).pathname + "nodes/" + result.data[0].id + "/children?filters=name:" + encodeURIComponent(escapeComponent(parse.base));
 					opt.method = "GET"
 				}, function(req) {
 					req.end();
