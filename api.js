@@ -164,6 +164,8 @@ Session.prototype.request = function(cb_pre, cb_opt, cb_req, cb_res) {
 	var requestId = sRequestId++;
 	var req = module.request(req_options, function(res) {
 		debugTransport("Response(%d): %d, Headers: %j", requestId, res.statusCode, res.headers);
+		req.removeListener("error",cb_res); // else, cb_res may be called again if the connection is reset
+		req.on("error", function(err) { res.emit("error", err) });
 		switch(res.statusCode) {
 			case 401: {
 				self.refresh_token( function(err) {
@@ -177,7 +179,11 @@ Session.prototype.request = function(cb_pre, cb_opt, cb_req, cb_res) {
 				cb_res(null, res, requestId);
 			break;
 			default:
-				cb_res(new Error(res.statusCode), res, requestId);
+                                self.read_response(res, requestId, JSON.parse, function(err, body) {
+                                        if(err) return cb_res(new Error(res.statusCode), res, requestId);
+                                        cb_res(new Error(JSON.stringify(body)), res, requestId);
+                                });
+
 			break;
 		}
 	});
